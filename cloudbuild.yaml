@@ -1,0 +1,62 @@
+steps:
+  # Build Docker image
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'build'
+      - '-t'
+      - 'gcr.io/$PROJECT_ID/amazon-ppc-automation:$SHORT_SHA'
+      - '-t'
+      - 'gcr.io/$PROJECT_ID/amazon-ppc-automation:latest'
+      - '.'
+
+  # Push to Container Registry
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'push'
+      - 'gcr.io/$PROJECT_ID/amazon-ppc-automation:$SHORT_SHA'
+
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'push'
+      - 'gcr.io/$PROJECT_ID/amazon-ppc-automation:latest'
+
+  # Deploy Bid Optimizer Job
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: gcloud
+    args:
+      - 'run'
+      - 'jobs'
+      - 'update'
+      - 'bid-optimizer'
+      - '--image=gcr.io/$PROJECT_ID/amazon-ppc-automation:$SHORT_SHA'
+      - '--region=us-central1'
+      - '--command=python,-m,automation.bid_optimizer'
+      - '--set-env-vars=GCP_PROJECT=$PROJECT_ID,BQ_DATASET=amazon_ppc,DRY_RUN=false'
+      - '--service-account=amazon-ppc-sa@$PROJECT_ID.iam.gserviceaccount.com'
+      - '--memory=2Gi'
+      - '--task-timeout=30m'
+      - '--max-retries=2'
+
+  # Deploy Budget Monitor Job
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: gcloud
+    args:
+      - 'run'
+      - 'jobs'
+      - 'update'
+      - 'budget-monitor'
+      - '--image=gcr.io/$PROJECT_ID/amazon-ppc-automation:$SHORT_SHA'
+      - '--region=us-central1'
+      - '--command=python,-m,automation.budget_monitor'
+      - '--set-env-vars=GCP_PROJECT=$PROJECT_ID,BQ_DATASET=amazon_ppc'
+      - '--service-account=amazon-ppc-sa@$PROJECT_ID.iam.gserviceaccount.com'
+      - '--memory=1Gi'
+      - '--task-timeout=10m'
+      - '--max-retries=1'
+
+images:
+  - 'gcr.io/$PROJECT_ID/amazon-ppc-automation:$SHORT_SHA'
+  - 'gcr.io/$PROJECT_ID/amazon-ppc-automation:latest'
+
+options:
+  logging: CLOUD_LOGGING_ONLY
