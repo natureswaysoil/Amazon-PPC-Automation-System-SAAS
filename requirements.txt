@@ -1,0 +1,10 @@
+google-cloud-bigquery==3.14.0
+google-cloud-secret-manager==2.16.4
+google-cloud-logging==3.8.0
+ad-api-client==0.1.0  # Amazon Ads API
+requests==2.31.0
+python-dateutil==2.8.2
+pytz==2023.3
+pydantic==2.5.0
+pydantic-settings==2.1.0
+tenacity==8.2.3
