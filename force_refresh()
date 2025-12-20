@@ -1,0 +1,100 @@
+cat > automation/shared/token_manager.py << 'PYEOF'
+import requests
+from datetime import datetime, timedelta
+from google.cloud import secretmanager
+from typing import Optional
+from .config import settings
+from .logger import get_logger
+
+logger = get_logger(__name__)
+
+class TokenManager:
+    TOKEN_URL = "https://api.amazon.com/auth/o2/token"
+    TOKEN_EXPIRY_BUFFER = 300
+    
+    def __init__(self):
+        self.project_id = settings.project_id
+        self.sm_client = secretmanager.SecretManagerServiceClient()
+        self.access_token: Optional[str] = None
+        self.refresh_token: Optional[str] = None
+        self.token_expires_at: Optional[datetime] = None
+        
+        self.client_id = self._get_secret("amazon_client_id")
+        self.client_secret = self._get_secret("amazon_client_secret")
+        self.refresh_token = self._get_secret("amazon_refresh_token")
+    
+    def _get_secret(self, secret_name: str) -> str:
+        try:
+            name = f"projects/{self.project_id}/secrets/{secret_name}/versions/latest"
+            response = self.sm_client.access_secret_version(request={"name": name})
+            return response.payload.data.decode("UTF-8")
+        except Exception as e:
+            logger.error(f"Error fetching secret {secret_name}: {e}")
+            raise
+    
+    def _update_secret(self, secret_name: str, new_value: str):
+        try:
+            parent = f"projects/{self.project_id}/secrets/{secret_name}"
+            self.sm_client.add_secret_version(
+                request={"parent": parent, "payload": {"data": new_value.encode("UTF-8")}}
+            )
+            logger.info(f"✅ Updated secret: {secret_name}")
+            return True
+        except Exception as e:
+            logger.error(f"Error updating secret: {e}")
+            return False
+    
+    def get_valid_access_token(self) -> str:
+        if self._needs_refresh():
+            self._refresh_access_token()
+        return self.access_token
+    
+    def force_refresh(self):
+        """Force immediate token refresh"""
+        logger.info("🔄 Forcing token refresh...")
+        self.access_token = None
+        self.token_expires_at = None
+        return self._refresh_access_token()
+    
+    def _needs_refresh(self) -> bool:
+        if not self.access_token or not self.token_expires_at:
+            return True
+        time_until_expiry = (self.token_expires_at - datetime.utcnow()).total_seconds()
+        return time_until_expiry < self.TOKEN_EXPIRY_BUFFER
+    
+    def _refresh_access_token(self):
+        payload = {
+            "grant_type": "refresh_token",
+            "refresh_token": self.refresh_token,
+            "client_id": self.client_id,
+            "client_secret": self.client_secret
+        }
+        try:
+            logger.info("🔄 Refreshing Amazon access token...")
+            response = requests.post(self.TOKEN_URL, data=payload, timeout=30)
+            response.raise_for_status()
+            
+            token_data = response.json()
+            self.access_token = token_data["access_token"]
+            expires_in = token_data.get("expires_in", 3600)
+            self.token_expires_at = datetime.utcnow() + timedelta(seconds=expires_in)
+            
+            logger.info(f"✅ Token refreshed (expires in {expires_in}s)")
+            
+            new_refresh_token = token_data.get("refresh_token")
+            if new_refresh_token and new_refresh_token != self.refresh_token:
+                logger.info("🔄 Refresh token rotated, updating Secret Manager...")
+                self.refresh_token = new_refresh_token
+                self._update_secret("amazon_refresh_token", new_refresh_token)
+        except Exception as e:
+            logger.error(f"❌ Token refresh failed: {e}")
+            raise
+
+_token_manager = None
+
+def get_token_manager() -> TokenManager:
+    global _token_manager
+    if _token_manager is None:
+        _token_manager = TokenManager()
+    return _token_manager
+PYEOF
