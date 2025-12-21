@@ -179,3 +179,53 @@ def main():
 
 if __name__ == "__main__":
     main()
+from aov_fetcher import aov_fetcher
+
+# AOV-based bid ceiling lookup
+AOV_CEILINGS = {
+    "L": {"base": 1.05, "max": 1.15},  # $18-29
+    "M": {"base": 1.40, "max": 1.60},  # $30-45
+    "H": {"base": 1.95, "max": 2.20},  # $46-70
+    "X": {"base": 2.50, "max": 2.75},  # $70+
+}
+
+def calculate_bid_ceiling(asin: str, performance_tier: str, match_type: str) -> float:
+    """
+    Calculate dynamic bid ceiling based on:
+    - ASIN AOV (real-time from BigQuery)
+    - Keyword performance tier
+    - Match type
+    """
+    # Get AOV tier
+    aov_tier = aov_fetcher.get_aov_tier(asin)
+    aov_data = aov_fetcher.get_aov(asin)
+    
+    # Base ceiling from AOV
+    base_ceiling = AOV_CEILINGS[aov_tier]["base"]
+    
+    # Performance tier modifier
+    tier_modifiers = {
+        "A": 1.00,  # Winners
+        "B": 0.85,  # Solid
+        "C": 0.65,  # Testing
+        "D": 0.40,  # Bleeding
+    }
+    
+    # Match type modifier
+    match_modifiers = {
+        "exact": 1.00,
+        "phrase": 0.75,
+        "broad": 0.50,
+    }
+    
+    ceiling = (
+        base_ceiling
+        * tier_modifiers.get(performance_tier, 0.65)
+        * match_modifiers.get(match_type, 0.75)
+    )
+    
+    # Apply confidence penalty for default AOV
+    if aov_data.confidence == "default":
+        ceiling *= 0.85
+    
+    return round(ceiling, 2)
