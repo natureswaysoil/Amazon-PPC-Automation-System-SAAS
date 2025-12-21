@@ -132,3 +132,23 @@ class AmazonAdsClient:
                 logger.error(f"❌ Batch update failed: {e}")
         
         return results
+import logging
+from aov_fetcher import aov_fetcher
+from bid_optimizer import optimize_bids
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+def main():
+    logger.info("🚀 Starting Amazon PPC optimization job...")
+    
+    # STEP 1: Fetch real-time AOV data
+    aov_fetcher.fetch_all()
+    
+    # STEP 2: Run optimization (now AOV-aware)
+    optimize_bids()
+    
+    logger.info("✅ Optimization complete")
+
+if __name__ == "__main__":
+    main()
