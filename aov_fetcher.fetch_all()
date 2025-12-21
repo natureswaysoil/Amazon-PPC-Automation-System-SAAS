@@ -1,0 +1,17 @@
+# Test script: test_aov.py
+from aov_fetcher import aov_fetcher
+
+aov_fetcher.fetch_all()
+
+# Test known ASIN
+test_asin = "B0D8RV56SC"  # Your actual ASIN
+aov_data = aov_fetcher.get_aov(test_asin)
+
+print(f"""
+ASIN: {aov_data.asin}
+AOV: ${aov_data.aov:.2f}
+Orders: {aov_data.orders}
+Confidence: {aov_data.confidence}
+Source: {aov_data.source}
+Tier: {aov_fetcher.get_aov_tier(test_asin)}
+""")
