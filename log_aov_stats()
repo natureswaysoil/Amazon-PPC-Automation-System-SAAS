@@ -1,0 +1,12 @@
+def log_aov_stats():
+    """Log AOV coverage statistics"""
+    high_confidence = sum(1 for aov in aov_fetcher._aov_14d.values() 
+                         if aov.confidence == "high")
+    
+    logger.info(f"""
+    📊 AOV Data Quality:
+    - 14d ASINs: {len(aov_fetcher._aov_14d)}
+    - 30d ASINs: {len(aov_fetcher._aov_30d)}
+    - High confidence: {high_confidence}
+    - Default fallbacks will be logged per-ASIN
+    """)
