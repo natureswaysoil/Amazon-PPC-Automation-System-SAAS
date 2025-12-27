@@ -1,25 +1,27 @@
 """
 Structured logging for Cloud Run
+Outputs JSON-formatted logs for Google Cloud Logging
 """
 
 import logging
 import json
-from datetime import datetime
-from .config import settings
+import sys
+from datetime import datetime, timezone
 
 def get_logger(name: str) -> logging.Logger:
     """Get configured logger for Cloud Logging"""
     
     logger = logging.getLogger(name)
     
+    # Only add handler if not already added (prevents duplicate logs)
     if not logger.handlers:
-        handler = logging.StreamHandler()
+        handler = logging.StreamHandler(sys.stdout)
         
         # Use JSON format for Cloud Logging
         class JsonFormatter(logging.Formatter):
             def format(self, record):
                 log_obj = {
-                    "timestamp": datetime.utcnow().isoformat(),
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
                     "severity": record.levelname,
                     "message": record.getMessage(),
                     "logger": record.name,
@@ -35,5 +37,16 @@ def get_logger(name: str) -> logging.Logger:
         handler.setFormatter(JsonFormatter())
         logger.addHandler(handler)
         logger.setLevel(logging.INFO)
+        
+        # Prevent logs from propagating to the root logger (avoids duplicates)
+        logger.propagate = False
     
     return logger
+
+
+
+
+
+Evaluate
+
+Compare
