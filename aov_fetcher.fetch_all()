@@ -1,17 +1,67 @@
-# Test script: test_aov.py
-from aov_fetcher import aov_fetcher
+import sys
+import os
+import logging
 
-aov_fetcher.fetch_all()
+# FIX: Add project root to path so imports work correctly (matching your Docker setup)
+sys.path.insert(0, '/app') 
+# Fallback: Add current directory if running locally
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-# Test known ASIN
-test_asin = "B0D8RV56SC"  # Your actual ASIN
-aov_data = aov_fetcher.get_aov(test_asin)
+try:
+    from backend.aov_fetcher import aov_fetcher
+    from backend.core.config import AOV_TIERS
+except ImportError as e:
+    print(f"❌ Import Error: {e}")
+    print("Ensure you are running this from the project root or your PYTHONPATH includes 'backend'.")
+    sys.exit(1)
 
-print(f"""
-ASIN: {aov_data.asin}
-AOV: ${aov_data.aov:.2f}
-Orders: {aov_data.orders}
-Confidence: {aov_data.confidence}
-Source: {aov_data.source}
-Tier: {aov_fetcher.get_aov_tier(test_asin)}
-""")
+# Helper function to replicate the logic from AOVBidOptimizer
+def calculate_tier(aov_value):
+    if aov_value is None:
+        return 'L'
+    for tier_code, tier in AOV_TIERS.items():
+        if tier.min_aov <= aov_value <= tier.max_aov:
+            return tier_code
+    return 'L'
+
+def run_test():
+    logging.basicConfig(level=logging.INFO)
+    logger = logging.getLogger(__name__)
+
+    print("🔄 Fetching AOV data from BigQuery...")
+    try:
+        # Load data into memory
+        aov_fetcher.fetch_all()
+    except Exception as e:
+        print(f"❌ Failed to fetch data: {e}")
+        return
+
+    # Test known ASIN
+    test_asin = "B0D8RV56SC" 
+    
+    print(f"🔎 Looking up ASIN: {test_asin}")
+    aov_data = aov_fetcher.get_aov(test_asin)
+
+    if not aov_data:
+        print("⚠️ ASIN not found in AOV cache (No sales in last 60 days?)")
+        return
+
+    # Safe attribute access
+    current_aov = getattr(aov_data, 'aov', 0.0)
+    current_orders = getattr(aov_data, 'orders', 0)
+    confidence = getattr(aov_data, 'confidence', 'LOW')
+    source = getattr(aov_data, 'source', 'UNKNOWN')
+
+    # FIX: Calculate tier locally since fetcher doesn't have this method
+    tier = calculate_tier(current_aov)
+
+    print("-" * 30)
+    print(f"ASIN:       {test_asin}")
+    print(f"AOV:        ${current_aov:.2f}")
+    print(f"Orders:     {current_orders}")
+    print(f"Confidence: {confidence}")
+    print(f"Source:     {source}")
+    print(f"Tier:       {tier}")
+    print("-" * 30)
+
+if __name__ == "__main__":
