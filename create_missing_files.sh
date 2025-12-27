@@ -1,7 +1,12 @@
 #!/bin/bash
-cd ~/amazon-ppc-automation
+# automated_setup.sh
 
-echo "Creating all automation files..."
+# 1. Create Directory Structure
+mkdir -p automation/shared
+touch automation/__init__.py
+touch automation/shared/__init__.py
+
+echo "📂 Created directory structure."
 
 # ============================================
 # automation/shared/config.py
@@ -11,15 +16,18 @@ import os
 from pydantic_settings import BaseSettings
 
 class Settings(BaseSettings):
+    # Cloud Run provides these automatically, but defaults help local dev
     project_id: str = os.getenv("GCP_PROJECT", "amazon-ppc-bid-optimizer")
     dataset_id: str = os.getenv("BQ_DATASET", "amazon_ppc")
     region: str = os.getenv("GCP_REGION", "us-central1")
     
+    # Bidding Rules
     default_target_acos: float = 0.30
     default_aov: float = 35.0
-    min_bid: float = 0.10
-    max_bid: float = 5.00
+    min_bid: float = 0.20  # Increased floor to prevent "dead" keywords
+    max_bid: float = 6.00
     
+    # System
     timezone: str = "America/New_York"
     dry_run: bool = os.getenv("DRY_RUN", "false").lower() == "true"
     
@@ -35,12 +43,13 @@ PYEOF
 # ============================================
 cat > automation/shared/logger.py << 'PYEOF'
 import logging
+import sys
 
 def get_logger(name: str) -> logging.Logger:
     logger = logging.getLogger(name)
     if not logger.handlers:
-        handler = logging.StreamHandler()
-        formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+        handler = logging.StreamHandler(sys.stdout)
+        formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
         handler.setFormatter(formatter)
         logger.addHandler(handler)
         logger.setLevel(logging.INFO)
@@ -71,10 +80,14 @@ class TokenManager:
         self.refresh_token: Optional[str] = None
         self.token_expires_at: Optional[datetime] = None
         
-        self.client_id = self._get_secret("amazon_client_id")
-        self.client_secret = self._get_secret("amazon_client_secret")
-        self.refresh_token = self._get_secret("amazon_refresh_token")
-    
+        # Load initial secrets
+        try:
+            self.client_id = self._get_secret("amazon_client_id")
+            self.client_secret = self._get_secret("amazon_client_secret")
+            self.refresh_token = self._get_secret("amazon_refresh_token")
+        except Exception as e:
+            logger.warning(f"Could not load secrets (local dev?): {e}")
+
     def _get_secret(self, secret_name: str) -> str:
         try:
             name = f"projects/{self.project_id}/secrets/{secret_name}/versions/latest"
@@ -165,12 +178,14 @@ class BigQueryClient:
         self.tz = pytz.timezone(settings.timezone)
     
     def get_asin_aov_map(self, days: int = 14, min_orders: int = 2) -> Dict[str, float]:
+        # FIX: Exclude last 3 days to avoid attribution lag
         query = f"""
         SELECT
-          advertisedAsin AS asin,
-          SAFE_DIVIDE(SUM(sales), NULLIF(SUM(purchases), 0)) AS aov
+            advertisedAsin AS asin,
+            SAFE_DIVIDE(SUM(sales), NULLIF(SUM(purchases), 0)) AS aov
         FROM `{self.project_id}.{self.dataset_id}.sp_advertised_product_metrics`
-        WHERE segments_date >= DATE_SUB(CURRENT_DATE(), INTERVAL @days DAY)
+        WHERE segments_date BETWEEN DATE_SUB(CURRENT_DATE(), INTERVAL @days + 3 DAY) 
+                                AND DATE_SUB(CURRENT_DATE(), INTERVAL 3 DAY)
         GROUP BY asin
         HAVING SUM(purchases) >= @min_orders
         """
@@ -192,24 +207,31 @@ class BigQueryClient:
             return {}
     
     def get_keywords_for_optimization(self, min_clicks: int = 5) -> List[Dict]:
+        # FIX: Added `advertisedAsin` to SELECT via Join or Assumptions
+        # FIX: Excluded last 3 days for attribution
         query = f"""
         SELECT
-          k.keywordId,
-          k.keywordText,
-          k.matchType,
-          k.bid as current_bid,
-          COALESCE(SUM(m.clicks), 0) as clicks,
-          COALESCE(SUM(m.purchases), 0) as conversions,
-          COALESCE(SUM(m.cost), 0) as spend,
-          COALESCE(SUM(m.sales), 0) as sales,
-          SAFE_DIVIDE(SUM(m.purchases), NULLIF(SUM(m.clicks), 0)) as cvr,
-          SAFE_DIVIDE(SUM(m.cost), NULLIF(SUM(m.sales), 0)) as acos
+            k.keywordId,
+            k.keywordText,
+            k.matchType,
+            k.bid as current_bid,
+            -- Try to get ASIN from metrics or Campaign mapping if available. 
+            -- Assuming sp_targeting_metrics has advertisedAsin in your schema:
+            m.advertisedAsin, 
+            COALESCE(SUM(m.clicks), 0) as clicks,
+            COALESCE(SUM(m.purchases), 0) as conversions,
+            COALESCE(SUM(m.cost), 0) as spend,
+            COALESCE(SUM(m.sales), 0) as sales,
+            SAFE_DIVIDE(SUM(m.purchases), NULLIF(SUM(m.clicks), 0)) as cvr,
+            SAFE_DIVIDE(SUM(m.cost), NULLIF(SUM(m.sales), 0)) as acos
         FROM `{self.project_id}.{self.dataset_id}.sp_keywords` k
         LEFT JOIN `{self.project_id}.{self.dataset_id}.sp_targeting_metrics` m
-          ON k.keywordId = m.targetId
-          AND m.segments_date >= DATE_SUB(CURRENT_DATE(), INTERVAL 14 DAY)
+            ON k.keywordId = m.targetId
+            -- 3 Day Exclusion Window
+            AND m.segments_date BETWEEN DATE_SUB(CURRENT_DATE(), INTERVAL 17 DAY) 
+                                    AND DATE_SUB(CURRENT_DATE(), INTERVAL 3 DAY)
         WHERE k.state = 'ENABLED'
-        GROUP BY 1,2,3,4
+        GROUP BY 1,2,3,4,5
         HAVING clicks >= @min_clicks OR conversions > 0
         """
         
@@ -242,10 +264,12 @@ class BigQueryClient:
         
         try:
             errors = self.client.insert_rows_json(table_id, [row])
-            if not errors:
+            if errors:
+                logger.error(f"BQ Insert Errors: {errors}")
+            else:
                 logger.info(f"Logged bid change: {keyword_id}")
         except Exception as e:
-            logger.error(f"Error logging: {e}")
+            logger.error(f"Error logging to BigQuery: {e}")
 PYEOF
 
 # ============================================
@@ -267,13 +291,23 @@ class BidCalculator:
     ) -> dict:
         current_hour = datetime.now(self.tz).hour
         
+        # Calculate dynamic ceiling
         aov_base = self._get_aov_base_ceiling(asin_aov)
         tier = self._classify_tier(conversions, clicks, acos, cvr)
+        
         perf_mult = self._get_performance_multiplier(tier)
         match_mult = self._get_match_type_modifier(match_type)
         time_mult = self._get_time_of_day_modifier(current_hour)
         
+        # Formula: Ceiling * Modifiers
         optimal_bid = aov_base * perf_mult * match_mult * time_mult
+        
+        # Logic Check: Don't just blindly use formula if we have data
+        # If performing well (Tier A), ensure we are at least increasing bid
+        if tier == "A" and optimal_bid < current_bid:
+             optimal_bid = current_bid * 1.10
+
+        # Hard Caps
         optimal_bid = max(settings.min_bid, min(optimal_bid, settings.max_bid))
         optimal_bid = round(optimal_bid, 2)
         
@@ -283,7 +317,7 @@ class BidCalculator:
             "optimal_bid": optimal_bid,
             "should_update": should_update,
             "tier": tier,
-            "reason": f"tier_{tier}_hour_{current_hour}"
+            "reason": f"tier_{tier}_h{current_hour}_aov{int(asin_aov)}"
         }
     
     def _get_aov_base_ceiling(self, aov: float) -> float:
@@ -295,22 +329,24 @@ class BidCalculator:
     def _classify_tier(self, conv: int, clicks: int, acos: float, cvr: float) -> str:
         if conv >= 2 and cvr >= 0.18 and acos <= 0.25: return "A"
         elif conv >= 1 and 0.10 <= cvr < 0.18 and acos <= 0.40: return "B"
-        elif clicks >= 30 and conv == 0: return "E"
-        elif clicks >= 20 and conv == 0: return "D"
-        else: return "C"
+        elif clicks >= 30 and conv == 0: return "E" # Heavy Bleeder
+        elif clicks >= 15 and conv == 0: return "D" # Warning
+        else: return "C" # Testing
     
     def _get_performance_multiplier(self, tier: str) -> float:
-        return {"A": 1.00, "B": 0.85, "C": 0.65, "D": 0.40, "E": 0.15}.get(tier, 0.65)
+        # A=Winner, B=Good, C=Test, D=Cut, E=Kill
+        return {"A": 1.20, "B": 1.00, "C": 0.75, "D": 0.40, "E": 0.15}.get(tier, 0.75)
     
     def _get_match_type_modifier(self, match_type: str) -> float:
-        return {"EXACT": 1.00, "PHRASE": 0.75, "BROAD": 0.50}.get(match_type.upper(), 0.75)
+        return {"EXACT": 1.00, "PHRASE": 0.80, "BROAD": 0.60}.get(match_type.upper(), 0.60)
     
     def _get_time_of_day_modifier(self, hour: int) -> float:
+        # Dayparting: Boost evening, cut overnight
         if 18 <= hour < 22: return 1.20
         elif 7 <= hour < 10: return 0.95
         elif 16 <= hour < 18: return 1.00
-        elif 11 <= hour < 15: return 0.80
-        elif 0 <= hour < 6: return 0.70
+        elif 11 <= hour < 15: return 0.85
+        elif 0 <= hour < 6: return 0.60
         else: return 1.00
 PYEOF
 
@@ -319,11 +355,20 @@ PYEOF
 # ============================================
 cat > automation/bid_optimizer.py << 'PYEOF'
 import sys
-from .shared.config import settings
-from .shared.logger import get_logger
-from .shared.bigquery_client import BigQueryClient
-from .shared.token_manager import get_token_manager
-from .shared.rules_engine import BidCalculator
+# Logic to handle running as script vs module
+try:
+    from automation.shared.config import settings
+    from automation.shared.logger import get_logger
+    from automation.shared.bigquery_client import BigQueryClient
+    from automation.shared.token_manager import get_token_manager
+    from automation.shared.rules_engine import BidCalculator
+except ImportError:
+    # Fallback if running from inside automation folder
+    from shared.config import settings
+    from shared.logger import get_logger
+    from shared.bigquery_client import BigQueryClient
+    from shared.token_manager import get_token_manager
+    from shared.rules_engine import BidCalculator
 
 logger = get_logger(__name__)
 
@@ -331,12 +376,12 @@ def main():
     logger.info("=" * 60)
     logger.info("🚀 Starting Bid Optimizer")
     logger.info(f"Project: {settings.project_id}")
-    logger.info(f"Dataset: {settings.dataset_id}")
     logger.info(f"Dry Run: {settings.dry_run}")
     logger.info("=" * 60)
     
     try:
         logger.info("\nStep 1: Refreshing Amazon API token...")
+        # Note: In a dry run, we still check the token to ensure connectivity
         token_manager = get_token_manager()
         token_manager.get_valid_access_token()
         logger.info("✅ Token ready")
@@ -359,7 +404,13 @@ def main():
         
         updates = []
         for kw in keywords:
-            aov = aov_map_14d.get(kw.get("asin")) or aov_map_30d.get(kw.get("asin")) or settings.default_aov
+            # FIX: Use correct key 'advertisedAsin' from SQL
+            asin = kw.get("advertisedAsin")
+            
+            # Fallback logic for AOV lookup
+            aov = settings.default_aov
+            if asin:
+                aov = aov_map_14d.get(asin) or aov_map_30d.get(asin) or settings.default_aov
             
             result = calculator.calculate_optimal_bid(
                 asin_aov=aov,
@@ -380,6 +431,7 @@ def main():
                     "tier": result["tier"]
                 })
                 
+                # In Dry Run, we still log to BQ with dry_run=True flag
                 bq.log_bid_change(
                     kw["keywordId"],
                     kw["current_bid"],
@@ -390,10 +442,13 @@ def main():
         logger.info(f"\n✅ Found {len(updates)} bids to update")
         
         for u in updates[:10]:
-            logger.info(f"  {u['keyword_text']}: ${u['old_bid']:.2f} → ${u['new_bid']:.2f} (Tier {u['tier']})")
+            logger.info(f"  {u['keyword_text']}: ${u['old_bid']:.2f} -> ${u['new_bid']:.2f} (Tier {u['tier']})")
         
         if settings.dry_run:
-            logger.info("\n[DRY RUN] No actual bid updates made")
+            logger.info("\n[DRY RUN] No actual bid updates sent to Amazon API")
+        else:
+            # TODO: Call Amazon API Batch Update here
+            pass
         
         logger.info("\n✅ Bid Optimizer Completed Successfully")
         
@@ -405,4 +460,16 @@ if __name__ == "__main__":
     main()
 PYEOF
 
-echo "✅ All files created!"
+echo "✅ All files created successfully in 'automation/' folder."
+echo "👉 To run: python3 -m automation.bid_optimizer"
+
+
+
+
+
+Evaluate
+
+Compare
+
+
+
