@@ -5,16 +5,26 @@ Pulls per-ASIN AOV from BigQuery with intelligent fallbacks
 
 import os
 import logging
-from typing import Dict, Tuple
-from dataclasses import dataclass
+import sys
+from typing import Dict, Optional
+from dataclasses import dataclass, replace
 from google.cloud import bigquery
-from functools import lru_cache
+
+# Ensure we can import backend modules
+sys.path.insert(0, '/app')
+
+try:
+    from backend.core.config import AOV_TIERS, settings
+except ImportError:
+    # Fallback for local testing if config is missing
+    AOV_TIERS = {}
+    settings = None
 
 logger = logging.getLogger(__name__)
 
 # Configuration
-PROJECT_ID = os.getenv("GCP_PROJECT", "amazon-ppc-474902")
-DATASET = os.getenv("BQ_DATASET", "amazon_ppc")
+PROJECT_ID = getattr(settings, 'PROJECT_ID', os.getenv("GCP_PROJECT", "amazon-ppc-474902"))
+DATASET = getattr(settings, 'BIGQUERY_DATASET', os.getenv("BQ_DATASET", "amazon_ppc"))
 TABLE = os.getenv("BQ_ASIN_METRICS_TABLE", "sp_advertised_product_metrics")
 DEFAULT_AOV = float(os.getenv("DEFAULT_AOV", "35.0"))
 
@@ -24,7 +34,7 @@ class AsinAOV:
     aov: float
     orders: int
     confidence: str  # 'high', 'medium', 'low', 'default'
-    source: str  # '14d', '30d', 'default'
+    source: str      # '14d', '30d', 'default'
 
 
 class AOVFetcher:
@@ -38,13 +48,19 @@ class AOVFetcher:
     def fetch_all(self) -> None:
         """Fetch both 14d and 30d AOV maps (call once per job run)"""
         logger.info("Fetching ASIN AOV data from BigQuery...")
+        
+        # We fetch data excluding the last 3 days to avoid attribution lag.
         self._aov_14d = self._fetch_aov_window(days=14, min_orders=2)
         self._aov_30d = self._fetch_aov_window(days=30, min_orders=2)
+        
         logger.info(f"✓ Loaded AOV for {len(self._aov_14d)} ASINs (14d), "
-                   f"{len(self._aov_30d)} ASINs (30d)")
+                    f"{len(self._aov_30d)} ASINs (30d)")
     
     def _fetch_aov_window(self, days: int, min_orders: int) -> Dict[str, AsinAOV]:
-        """Fetch AOV for a specific time window"""
+        """Fetch AOV for a specific time window, ignoring recent unstable data"""
+        
+        # FIX: The window is shifted back by 3 days.
+        # e.g., if days=14, we look from Day -17 to Day -3.
         query = f"""
         SELECT
           advertisedAsin AS asin,
@@ -54,12 +70,13 @@ class AOVFetcher:
           COUNT(DISTINCT segments_date) AS active_days
         FROM `{PROJECT_ID}.{DATASET}.{TABLE}`
         WHERE 
-          segments_date >= DATE_SUB(CURRENT_DATE(), INTERVAL @days DAY)
+          segments_date BETWEEN DATE_SUB(CURRENT_DATE(), INTERVAL @days + 3 DAY) 
+                            AND DATE_SUB(CURRENT_DATE(), INTERVAL 3 DAY)
           AND sales > 0
         GROUP BY asin
         HAVING 
           orders >= @min_orders
-          AND aov > 10  -- Sanity check
+          AND aov > 5  -- Low sanity check to catch cheap items
         """
         
         job_config = bigquery.QueryJobConfig(
@@ -105,21 +122,23 @@ class AOVFetcher:
         """
         Get AOV for ASIN with intelligent fallback:
         1. Try 14-day window (most recent)
-        2. Fall back to 30-day window
+        2. Fall back to 30-day window (lower confidence)
         3. Fall back to default
         """
+        # 1. Check primary (recent) cache
         if asin in self._aov_14d:
             return self._aov_14d[asin]
         
+        # 2. Check secondary (extended) cache
         if asin in self._aov_30d:
-            aov_data = self._aov_30d[asin]
-            # Downgrade confidence for stale data
-            if aov_data.confidence == "high":
-                aov_data.confidence = "medium"
-            return aov_data
+            original = self._aov_30d[asin]
+            # FIX: Use replace() to avoid modifying the cached object
+            if original.confidence == "high":
+                return replace(original, confidence="medium")
+            return original
         
-        # Default fallback
-        logger.debug(f"Using default AOV for {asin}")
+        # 3. Default fallback
+        # logger.debug(f"Using default AOV for {asin}")
         return AsinAOV(
             asin=asin,
             aov=DEFAULT_AOV,
@@ -130,20 +149,24 @@ class AOVFetcher:
     
     def get_aov_tier(self, asin: str) -> str:
         """
-        Classify ASIN into AOV tier for bid ceiling lookup
-        Returns: 'L', 'M', 'H', 'X'
+        Classify ASIN into AOV tier for bid ceiling lookup.
+        Dynamically uses the ranges defined in config.py.
         """
         aov_data = self.get_aov(asin)
-        aov = aov_data.aov
+        current_aov = aov_data.aov
         
-        if aov < 30:
-            return "L"
-        elif aov < 46:
-            return "M"
-        elif aov < 70:
-            return "H"
-        else:
-            return "X"
+        # FIX: Loop through config tiers instead of hardcoding numbers
+        if AOV_TIERS:
+            for tier_code, tier in AOV_TIERS.items():
+                if tier.min_aov <= current_aov <= tier.max_aov:
+                    return tier_code
+            return 'L' # Default if out of bounds (e.g. extremely low/high)
+
+        # Fallback if config is missing (for safety)
+        if current_aov < 30: return "L"
+        elif current_aov < 46: return "M"
+        elif current_aov < 70: return "H"
+        else: return "X"
 
 
 # Global instance (initialized once per job run)
