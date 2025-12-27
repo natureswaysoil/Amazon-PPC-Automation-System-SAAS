@@ -1,12 +1,122 @@
-def log_aov_stats():
-    """Log AOV coverage statistics"""
-    high_confidence = sum(1 for aov in aov_fetcher._aov_14d.values() 
-                         if aov.confidence == "high")
-    
-    logger.info(f"""
-    📊 AOV Data Quality:
-    - 14d ASINs: {len(aov_fetcher._aov_14d)}
-    - 30d ASINs: {len(aov_fetcher._aov_30d)}
-    - High confidence: {high_confidence}
-    - Default fallbacks will be logged per-ASIN
-    """)
+import sys
+from automation.shared.config import settings
+from automation.shared.logger import get_logger
+from automation.shared.bigquery_client import BigQueryClient
+from automation.shared.amazon_client import AmazonAdsClient
+from automation.shared.rules_engine import BidCalculator
+
+logger = get_logger(__name__)
+
+class BidOptimizerJob:
+    def __init__(self):
+        self.bq = BigQueryClient()
+        self.amz = AmazonAdsClient()
+        self.calculator = BidCalculator()
+        self.aov_map_14d = {}
+        self.aov_map_30d = {}
+
+    def _log_aov_stats(self):
+        """Log AOV coverage statistics to ensure data quality"""
+        # Count confidence levels
+        high_conf_14d = sum(1 for asin, aov in self.aov_map_14d.items() if aov > 0)
+        
+        # Calculate overlap (ASINs present in both)
+        overlap = len(set(self.aov_map_14d.keys()) & set(self.aov_map_30d.keys()))
+
+        logger.info(f"""
+        📊 AOV Data Quality Report:
+        ---------------------------
+        - 14d Active ASINs:    {len(self.aov_map_14d)} (Recent Trend)
+        - 30d Active ASINs:    {len(self.aov_map_30d)} (Historical Baseline)
+        - ASIN Overlap:        {overlap}
+        - Default Fallback:    ${settings.default_aov:.2f}
+        ---------------------------
+        """)
+
+    def run(self):
+        logger.info("=" * 60)
+        logger.info("🚀 Starting Bid Optimizer Job")
+        logger.info(f"Project: {settings.project_id}")
+        logger.info(f"Dry Run: {settings.dry_run}")
+        logger.info("=" * 60)
+        
+        try:
+            # 1. Load Data
+            logger.info("\nStep 1: Loading Performance Data")
+            
+            # Fetch AOV Maps
+            self.aov_map_14d = self.bq.get_asin_aov_map(days=14, min_orders=2)
+            self.aov_map_30d = self.bq.get_asin_aov_map(days=30, min_orders=2)
+            
+            # Log Statistics
+            self._log_aov_stats()
+            
+            # Fetch Keywords
+            keywords = self.bq.get_keywords_for_optimization(min_clicks=5)
+            
+            if not keywords:
+                logger.info("⚠️ No keywords found to optimize.")
+                return
+
+            # 2. Calculate Bids
+            logger.info(f"\nStep 2: Calculating Bids for {len(keywords)} keywords")
+            updates = []
+            
+            for kw in keywords:
+                # Determine AOV (Hierarchy: 14d -> 30d -> Default)
+                asin = kw.get("advertisedAsin")
+                aov = settings.default_aov
+                
+                if asin:
+                    # Prefer recent data, fall back to 30d, then default
+                    aov = self.aov_map_14d.get(asin) or self.aov_map_30d.get(asin) or settings.default_aov
+                
+                # Calculation Logic
+                result = self.calculator.calculate_optimal_bid(
+                    asin_aov=aov,
+                    current_bid=kw["current_bid"],
+                    conversions=kw["conversions"],
+                    clicks=kw["clicks"],
+                    acos=kw.get("acos", 0) or 0,
+                    cvr=kw.get("cvr", 0) or 0,
+                    match_type=kw["matchType"]
+                )
+                
+                if result["should_update"]:
+                    updates.append({
+                        "keyword_id": kw["keywordId"],
+                        "keyword_text": kw["keywordText"],
+                        "old_bid": kw["current_bid"],
+                        "new_bid": result["optimal_bid"],
+                        "tier": result["tier"],
+                        "reason": result["reason"]
+                    })
+
+            # 3. Log & Update
+            logger.info(f"\nStep 3: Processing {len(updates)} bid updates")
+            
+            # Batch logging to BQ
+            for u in updates:
+                self.bq.log_bid_change(
+                    u["keyword_id"], 
+                    u["old_bid"], 
+                    u["new_bid"], 
+                    u["reason"]
+                )
+                
+                if not settings.dry_run:
+                    self.amz.update_keyword_bid(u["keyword_id"], u["new_bid"])
+                else:
+                    # Log sample for debug
+                    if len(updates) < 20 or u == updates[0]: 
+                         logger.info(f"[DRY RUN] {u['keyword_text']}: ${u['old_bid']:.2f} -> ${u['new_bid']:.2f}")
+
+            logger.info("\n✅ Bid Optimizer Completed Successfully")
+            
+        except Exception as e:
+            logger.error(f"❌ Job Failed: {e}", exc_info=True)
+            sys.exit(1)
+
+if __name__ == "__main__":
+    job = BidOptimizerJob()
+    job.run()
