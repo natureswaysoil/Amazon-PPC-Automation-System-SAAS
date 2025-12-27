@@ -1,5 +1,5 @@
 steps:
-  # Build Docker image
+  # 1. Build Docker image
   - name: 'gcr.io/cloud-builders/docker'
     args:
       - 'build'
@@ -9,7 +9,7 @@ steps:
       - 'gcr.io/$PROJECT_ID/amazon-ppc-automation:latest'
       - '.'
 
-  # Push to Container Registry
+  # 2. Push to Container Registry
   - name: 'gcr.io/cloud-builders/docker'
     args:
       - 'push'
@@ -20,7 +20,8 @@ steps:
       - 'push'
       - 'gcr.io/$PROJECT_ID/amazon-ppc-automation:latest'
 
-  # Deploy Bid Optimizer Job
+  # 3. Deploy Bid Optimizer Job
+  # Note: The job must be created manually once via 'gcloud run jobs create'
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
     entrypoint: gcloud
     args:
@@ -30,14 +31,15 @@ steps:
       - 'bid-optimizer'
       - '--image=gcr.io/$PROJECT_ID/amazon-ppc-automation:$SHORT_SHA'
       - '--region=us-central1'
-      - '--command=python,-m,automation.bid_optimizer'
+      # FIX: Point to the specific file name in the root directory
+      - '--command=python,bid_optimizer.py'
       - '--set-env-vars=GCP_PROJECT=$PROJECT_ID,BQ_DATASET=amazon_ppc,DRY_RUN=false'
       - '--service-account=amazon-ppc-sa@$PROJECT_ID.iam.gserviceaccount.com'
       - '--memory=2Gi'
       - '--task-timeout=30m'
       - '--max-retries=2'
 
-  # Deploy Budget Monitor Job
+  # 4. Deploy Budget Monitor Job
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
     entrypoint: gcloud
     args:
@@ -47,8 +49,9 @@ steps:
       - 'budget-monitor'
       - '--image=gcr.io/$PROJECT_ID/amazon-ppc-automation:$SHORT_SHA'
       - '--region=us-central1'
-      - '--command=python,-m,automation.budget_monitor'
-      - '--set-env-vars=GCP_PROJECT=$PROJECT_ID,BQ_DATASET=amazon_ppc'
+      # FIX: Point to the specific file name in the root directory
+      - '--command=python,budget_monitor.py'
+      - '--set-env-vars=GCP_PROJECT=$PROJECT_ID,BQ_DATASET=amazon_ppc,DRY_RUN=false'
       - '--service-account=amazon-ppc-sa@$PROJECT_ID.iam.gserviceaccount.com'
       - '--memory=1Gi'
       - '--task-timeout=10m'
@@ -60,3 +63,12 @@ images:
 
 options:
   logging: CLOUD_LOGGING_ONLY
+
+
+
+
+
+Evaluate
+
+Compare
+
