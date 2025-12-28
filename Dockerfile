@@ -5,6 +5,7 @@ FROM python:3.11-slim
 WORKDIR /app
 
 # Install system dependencies
+# gcc is needed for some Python packages that compile C extensions
 RUN apt-get update \
   && apt-get install -y gcc \
   && rm -rf /var/lib/apt/lists/* \
@@ -16,18 +17,14 @@ COPY requirements.txt .
 # Install Python dependencies
 RUN pip install --no-cache-dir -r requirements.txt
 
-# --- THE FIX IS HERE ---
-# Copy ALL application code from your local project root into /app
-# This includes the 'automation' folder AND any script outside it.
-COPY . . 
-# -----------------------
+# --- MAIN CODE COPY ---
+# Copy ALL application code from your local project root into the container's /app directory.
+# This ensures the 'automation' folder and its contents are present.
+COPY . .
 
-# Set Python path to include the /app directory
+# Set Python path to include the /app directory so Python can find your modules.
 ENV PYTHONPATH=/app
 
-# IMPORTANT: You need to tell the container what to run.
-# If you are trying to run the module directly:
-# CMD ["python", "-m", "automation.bid_optimizer"]
-
-# OR if you have a main entrypoint script outside the automation folder:
-# CMD ["python", "main.py"]
+# Tell the container what command to run when it starts.
+# This executes the bid_optimizer module inside the automation package.
+CMD ["python", "-m", "automation.bid_optimizer"]
