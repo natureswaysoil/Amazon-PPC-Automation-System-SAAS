@@ -1,0 +1,194 @@
+import requests
+import time
+import logging
+import datetime
+
+# === CONFIGURATION - REPLACE WITH YOUR REAL CREDENTIALS ===
+# WARNING: In production, never hardcode credentials. Use environment variables.
+CONFIG = {
+    'client_id': 'YOUR_AMZN_CLIENT_ID',
+    'client_secret': 'YOUR_CLIENT_SECRET',
+    # You MUST have this long string. It's what lets you reconnect forever.
+    'refresh_token': 'YOUR_LONG_REFRESH_TOKEN_Atzr|...', 
+    # The profile ID for the specific marketplace account you want to control
+    'profile_id': 'YOUR_PROFILE_ID_12345', 
+    # Region endpoint (e.g., advertising-api.amazon.com for NA, advertising-api-eu.amazon.com for EU)
+    'api_base_url': 'https://advertising-api.amazon.com',
+    # The rules
+    'daily_budget_cap': 500.00,
+    'check_interval_minutes': 30
+}
+
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+
+
+class AmazonAuthManager:
+    """
+    THIS CLASS SOLVES YOUR PROBLEM.
+    It manages the tokens and automatically refreshes them when they expire.
+    """
+    def __init__(self, config):
+        self.client_id = config['client_id']
+        self.client_secret = config['client_secret']
+        self.refresh_token = config['refresh_token']
+        self.token_url = 'https://api.amazon.com/auth/o2/token'
+        self.access_token = None
+        self.token_expiry_time = None
+
+    def _refresh_access_token(self):
+        """Internal method to call Amazon Auth API and get a new 60-minute token."""
+        logger.info("Attempting to refresh Amazon Access Token...")
+        payload = {
+            'grant_type': 'refresh_token',
+            'refresh_token': self.refresh_token,
+            'client_id': self.client_id,
+            'client_secret': self.client_secret
+        }
+        try:
+            response = requests.post(self.token_url, data=payload, timeout=30)
+            response.raise_for_status() # Raise exception for bad status codes (4xx, 5xx)
+            
+            data = response.json()
+            self.access_token = data['access_token']
+            # Set expiry to 55 minutes from now to be safe (token lasts 60 mins)
+            self.token_expiry_time = datetime.datetime.now() + datetime.timedelta(minutes=55)
+            logger.info("Successfully refreshed Access Token. Valid for next 55 minutes.")
+            
+        except requests.exceptions.RequestException as e:
+            logger.critical(f"FAILED to refresh token: {e}")
+            if response:
+                 logger.critical(f"Amazon Response: {response.text}")
+            raise Exception("Authentication Failed - Could not refresh token")
+
+    def get_auth_headers(self, profile_id):
+        """
+        Call this BEFORE EVERY API REQUEST. 
+        It checks if the token is expired. If yes, it refreshes it first.
+        Returns the headers needed for the API call.
+        """
+        # Check if token exists or is expired/expiring soon
+        if not self.access_token or datetime.datetime.now() >= self.token_expiry_time:
+            logger.info("Token is expired or missing.")
+            self._refresh_access_token()
+        
+        return {
+            'Authorization': f'Bearer {self.access_token}',
+            'Amazon-Advertising-API-ClientId': self.client_id,
+            'Amazon-Advertising-API-Scope': profile_id,
+            'Content-Type': 'application/json'
+        }
+
+
+# === THE CONTROLLER LOGIC ===
+
+def get_total_account_spend_today(auth_manager, config):
+    """
+    Fetches spend. Note: Getting accurate real-time spend is complex.
+    This uses a simpler endpoint for demonstration, but production apps use reporting snapshots.
+    """
+    headers = auth_manager.get_auth_headers(config['profile_id'])
+    # Using the /v2/campaigns endpoint extended with metrics as a simpler way to get data.
+    # Note: Amazon is migrating to v3, but v2 still works for this for now.
+    url = f"{config['api_base_url']}/v2/campaigns/extended?stateFilter=ENABLED"
+    
+    total_spend = 0.0
+    
+    try:
+        logger.info("Fetching campaign data from Amazon...")
+        # Note: A real production script needs pagination handling here for >100 campaigns
+        response = requests.get(url, headers=headers, timeout=30)
+        response.raise_for_status()
+        campaigns_data = response.json()
+
+        # Find today's date string match Amazon's format if needed, 
+        # but the extended endpoint usually returns aggregated metrics.
+        # IMPORTANT: Amazon API data has latency (1-4 hours). Spend is not real-time.
+        
+        # WARNING: The extended endpoint metrics might not be strictly "today". 
+        # For absolute accuracy, you must use the asynchronous Reporting API (/v2/hsa/campaigns/report),
+        # which is too complex for a single script example.
+        # This block assumes the metrics returned are relevant for current monitoring.
+        for camp in campaigns_data:
+            # We check cost, defaulting to 0 if missing
+            spend = float(camp.get('metrics', {}).get('cost', 0.0))
+            total_spend += spend
+
+        logger.info(f"Calculated Total Spend from currently enabled campaigns: ${total_spend:.2f}")
+        return total_spend, campaigns_data
+
+    except Exception as e:
+        logger.error(f"Error fetching spend data: {e}")
+        return 0.0, []
+
+def execute_budget_pause(auth_manager, config, campaigns_list):
+    """Iterates through enabled campaigns and pauses them."""
+    headers = auth_manager.get_auth_headers(config['profile_id'])
+    url = f"{config['api_base_url']}/v2/campaigns"
+    
+    updates_to_send = []
+    for camp in campaigns_list:
+        logger.info(f"Queueing PAUSE for campaign: {camp['name']} (ID: {camp['campaignId']})")
+        updates_to_send.append({
+            "campaignId": camp['campaignId'],
+            "state": "PAUSED"
+        })
+
+    if not updates_to_send:
+        return
+
+    # Send updates in bulk (chunks of 10 recommended for Amazon API)
+    chunk_size = 10
+    for i in range(0, len(updates_to_send), chunk_size):
+        chunk = updates_to_send[i:i + chunk_size]
+        try:
+            logger.warning(f"Sending BULK PAUSE command to Amazon for {len(chunk)} campaigns...")
+            response = requests.put(url, headers=headers, json=chunk, timeout=30)
+            response.raise_for_status()
+            logger.info(f"Pause command successful. Response: {response.text}")
+        except Exception as e:
+            logger.critical(f"FAILED to pause campaigns: {e}")
+            # In production, you need serious alert mechanisms here (SMS, email)
+
+# === MAIN LOOP ===
+
+if __name__ == "__main__":
+    # 1. Initialize the Auth Manager ONCE. It will handle tokens forever.
+    auth_manager = AmazonAuthManager(CONFIG)
+    
+    logger.info("Starting Budget Controller...")
+    logger.info(f"Target Cap: ${CONFIG['daily_budget_cap']}, Interval: {CONFIG['check_interval_minutes']} mins")
+
+    try:
+        # Verify connection immediately
+        auth_manager.get_auth_headers(CONFIG['profile_id'])
+        logger.info("Initial connection and token generation successful.")
+
+        while True:
+            logger.info("--- Starting Check Cycle ---")
+            # 2. Get Spend
+            current_spend, enabled_campaigns = get_total_account_spend_today(auth_manager, CONFIG)
+
+            # 3. Check Rules
+            if current_spend >= CONFIG['daily_budget_cap']:
+                 logger.critical(f"BUDGET BREACH: Spend ${current_spend:.2f} >= Cap ${CONFIG['daily_budget_cap']:.2f}")
+                 # 4. Take Action
+                 execute_budget_pause(auth_manager, CONFIG, enabled_campaigns)
+            else:
+                remaining = CONFIG['daily_budget_cap'] - current_spend
+                logger.info(f"Spend within limits. Remaining: ${remaining:.2f}")
+
+            logger.info("--- Cycle Finished ---")
+            # Sleep until next check
+            time.sleep(CONFIG['check_interval_minutes'] * 60)
+
+    except KeyboardInterrupt:
+        logger.info("Stopped by user.")
+    except Exception as e:
+        logger.critical(f"Fatal Error in main loop: {e}")
+
+
+
+Evaluate
+
+Compare
