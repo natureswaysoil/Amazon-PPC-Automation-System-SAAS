@@ -27,4 +27,4 @@ ENV PYTHONPATH=/app
 
 # Tell the container what command to run when it starts.
 # This executes the bid_optimizer module inside the automation package.
-CMD ["python", "-m", "automation.bid_optimizer"]
+CMD ["python", "main.py"]
