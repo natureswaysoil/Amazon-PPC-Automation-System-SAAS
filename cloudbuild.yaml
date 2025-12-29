@@ -20,7 +20,28 @@ steps:
       - 'push'
       - 'gcr.io/$PROJECT_ID/amazon-ppc-automation:latest'
 
-  # 3. Deploy Bid Optimizer Job
+  # 3. Deploy Cloud Run Service
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk:slim'
+    id: 'Deploy'
+    entrypoint: gcloud
+    args:
+      - 'run'
+      - 'deploy'
+      - 'amazon-ppc-automation-system-saas'
+      - '--image=gcr.io/$PROJECT_ID/amazon-ppc-automation:$SHORT_SHA'
+      - '--region=us-central1'
+      - '--platform=managed'
+      - '--port=8080'
+      - '--set-env-vars=GCP_PROJECT=$PROJECT_ID,BQ_DATASET=amazon_ppc'
+      - '--service-account=amazon-ppc-sa@$PROJECT_ID.iam.gserviceaccount.com'
+      - '--memory=512Mi'
+      - '--timeout=300s'
+      - '--cpu=1'
+      - '--min-instances=0'
+      - '--max-instances=1'
+      - '--allow-unauthenticated'
+
+  # 4. Deploy Bid Optimizer Job
   # Note: The job must be created manually once via 'gcloud run jobs create'
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
     entrypoint: gcloud
@@ -39,7 +60,7 @@ steps:
       - '--task-timeout=30m'
       - '--max-retries=2'
 
-  # 4. Deploy Budget Monitor Job
+  # 5. Deploy Budget Monitor Job
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
     entrypoint: gcloud
     args:
