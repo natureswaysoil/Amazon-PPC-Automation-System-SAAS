@@ -23,18 +23,26 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
             self.send_response(200)
             self.send_header("Content-type", "text/plain")
             self.end_headers()
-            self.wfile.write(b"OK - Amazon PPC Automation System\n")
-            self.wfile.write(b"This container is designed for Cloud Run Jobs.\n")
-            self.wfile.write(b"See bid_optimizer.py and budget_monitor.py for job logic.\n")
+            try:
+                self.wfile.write(b"OK - Amazon PPC Automation System\n")
+                self.wfile.write(b"This container is designed for Cloud Run Jobs.\n")
+                self.wfile.write(b"See bid_optimizer.py and budget_monitor.py for job logic.\n")
+            except (BrokenPipeError, ConnectionResetError):
+                # Client closed connection early, ignore
+                pass
         else:
             self.send_response(404)
             self.send_header("Content-type", "text/plain")
             self.end_headers()
-            self.wfile.write(b"Not Found\n")
+            try:
+                self.wfile.write(b"Not Found\n")
+            except (BrokenPipeError, ConnectionResetError):
+                # Client closed connection early, ignore
+                pass
     
     def log_message(self, format, *args):
         """Override to use Python logging"""
-        logger.info(f"{self.address_string()} - {format % args}")
+        logger.info(f"{self.address_string()} - {format}", *args)
 
 
 def main():
