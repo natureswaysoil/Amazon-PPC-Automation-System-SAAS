@@ -25,6 +25,9 @@ COPY . .
 # Set Python path to include the /app directory so Python can find your modules.
 ENV PYTHONPATH=/app
 
+# Ensure Python output is not buffered (critical for Cloud Run logging)
+ENV PYTHONUNBUFFERED=1
+
 # Tell the container what command to run when it starts.
 # This executes the bid_optimizer module inside the automation package.
 CMD ["python", "main.py"]
