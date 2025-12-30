@@ -7,10 +7,16 @@ which are executed via Cloud Run Jobs with custom --command flags.
 """
 
 import os
+import sys
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import logging
 
-logging.basicConfig(level=logging.INFO)
+# Configure logging to flush immediately to stdout for Cloud Run
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    stream=sys.stdout
+)
 logger = logging.getLogger(__name__)
 
 
@@ -53,7 +59,13 @@ def main():
     logger.info("Note: This container is designed for Cloud Run Jobs")
     logger.info("Jobs should use --command=python,<job_script>.py")
     
+    # Create and bind the server
     server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
+    
+    # Log that server is ready to accept connections
+    logger.info(f"Server successfully bound to 0.0.0.0:{port}")
+    logger.info("Server is ready to accept connections")
+    sys.stdout.flush()  # Ensure logs are immediately visible to Cloud Run
     
     try:
         server.serve_forever()

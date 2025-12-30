@@ -32,7 +32,7 @@ steps:
       - '--region=us-central1'
       - '--platform=managed'
       - '--port=8080'
-      - '--set-env-vars=GCP_PROJECT=$PROJECT_ID,BQ_DATASET=amazon_ppc'
+      - '--set-env-vars=GCP_PROJECT=$PROJECT_ID,BQ_DATASET=amazon_ppc,PYTHONUNBUFFERED=1'
       - '--service-account=amazon-ppc-sa@$PROJECT_ID.iam.gserviceaccount.com'
       - '--memory=512Mi'
       - '--timeout=300s'
@@ -40,6 +40,7 @@ steps:
       - '--min-instances=0'
       - '--max-instances=1'
       - '--allow-unauthenticated'
+      - '--cpu-boost'
 
   # 4. Deploy Bid Optimizer Job
   # Note: The job must be created manually once via 'gcloud run jobs create'
