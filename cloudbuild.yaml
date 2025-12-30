@@ -40,6 +40,7 @@ steps:
       - '--min-instances=0'
       - '--max-instances=1'
       - '--allow-unauthenticated'
+      - '--cpu-boost'
 
   # 4. Deploy Bid Optimizer Job
   # Note: The job must be created manually once via 'gcloud run jobs create'
