@@ -2,6 +2,39 @@
 Amazon Advertising API client with automatic token refresh
 """
 
+@retry(stop=stop_after_attempt(5), wait=wait_exponential(multiplier=1, min=2, max=10),
+       retry=retry_if_exception_type(requests.exceptions.HTTPError))
+def update_keyword_bid(self, keyword_id: Union[str, int], new_bid: float) -> Optional[Dict]:
+    """Update existing keyword bid"""
+    
+    # Log what we received
+    logger.debug(f"update_keyword_bid called with keyword_id={keyword_id} (type: {type(keyword_id).__name__}), new_bid={new_bid} (type: {type(new_bid).__name__})")
+    
+    if settings.dry_run:
+        logger.info(f"[DRY RUN] Would update keyword {keyword_id} bid to ${new_bid:.2f}")
+        return {"status": "dry_run_success"}
+
+    # Ensure keywordId is always a string
+    processed_keyword_id = str(keyword_id)
+    
+    # Ensure bid is a float, not Decimal or other numeric type
+    processed_bid = float(new_bid)
+
+    payload = [{
+        "keywordId": processed_keyword_id,
+        "bid": processed_bid,
+        "state": "ENABLED"
+    }]
+
+    endpoint = "/v2/sp/keywords"
+
+    response_data = self._make_request("PUT", endpoint, payload)
+    if response_data:
+        logger.info(f"✅ Updated keyword {keyword_id} bid to ${new_bid:.2f}. Response: {response_data}")
+        return response_data
+    logger.error(f"❌ Failed to update keyword {keyword_id} bid to ${new_bid:.2f}")
+    return None
+
 import requests
 import time
 from google.cloud import secretmanager
