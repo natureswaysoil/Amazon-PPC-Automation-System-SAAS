@@ -58,7 +58,7 @@ class AmazonAdsClient:
         url = f"{self.BASE_URL}{endpoint}"
 
         # CRITICAL DEBUGGING STEP: Log the actual payload being sent
-        logger.debug(f"Sending {} request to {} with payload: {}")
+        logger.debug(f"Sending {method} request to {url} with payload: {payload}")
 
         try:
             response = self._execute_request_once(method, url, payload)
@@ -76,20 +76,20 @@ class AmazonAdsClient:
                     retry_response.raise_for_status()
                     return retry_response.json() # Return JSON response body on retry success
                 except Exception as retry_e:
-                    logger.error(f"❌ Retry after token refresh failed for {}. Error: {retry_e}. Response: {getattr(retry_e, 'response', None).text if getattr(retry_e, 'response', None) else 'N/A'}")
+                    logger.error(f"❌ Retry after token refresh failed for {url}. Error: {retry_e}. Response: {getattr(retry_e, 'response', None).text if getattr(retry_e, 'response', None) else 'N/A'}")
                     return None
 
             # Handle Rate Limiting (429) - Tenacity will catch this
             elif e.response.status_code == 429:
-                logger.warning(f"⚠️ Got 429 Too Many Requests for {}. (Tenacity will retry if configured)")
+                logger.warning(f"⚠️ Got 429 Too Many Requests for {url}. (Tenacity will retry if configured)")
                 raise e # Re-raise to let Tenacity handle backing off
 
             else:
-                logger.error(f"❌ HTTP Error {e.response.status_code} for {}: {e.response.text}. Request Method: {}, Payload: {}")
+                logger.error(f"❌ HTTP Error {e.response.status_code} for {url}: {e.response.text}. Request Method: {method}, Payload: {payload}")
                 return None
 
         except Exception as e:
-            logger.error(f"❌ Request to {} failed. Error: {}. Request Method: {}, Payload: {}")
+            logger.error(f"❌ Request to {url} failed. Error: {e}. Request Method: {method}, Payload: {payload}")
             return None
 
     @retry(stop=stop_after_attempt(5), wait=wait_exponential(multiplier=1, min=2, max=10),
@@ -117,7 +117,7 @@ class AmazonAdsClient:
 
         response_data = self._make_request("PUT", endpoint, payload)
         if response_data:
-            logger.info(f"✅ Updated keyword {keyword_id} bid to ${new_bid:.2f}. Response: {}")
+            logger.info(f"✅ Updated keyword {keyword_id} bid to ${new_bid:.2f}. Response: {response_data}")
             return response_data
         logger.error(f"❌ Failed to update keyword {keyword_id} bid to ${new_bid:.2f}")
         return None
@@ -127,16 +127,16 @@ class AmazonAdsClient:
         wait=wait_exponential(multiplier=1, min=2, max=10),
         retry=retry_if_exception_type(requests.exceptions.HTTPError)
     )
-    def create_keyword(self, campaign_id: str, ad_group_id: str, keyword_text: str,
+    def create_keyword(self, campaign_id: Union[str, int], ad_group_id: Union[str, int], keyword_text: str,
                        match_type: str, bid: float) -> Optional[Dict]: # Return Optional[Dict] for the response
         """Create a new keyword"""
         if settings.dry_run:
-            logger.info(f"[DRY RUN] Would create keyword: '{keyword_text}' ({match_type}) in Campaign {}, AdGroup {} @ ${bid:.2f}")
+            logger.info(f"[DRY RUN] Would create keyword: '{keyword_text}' ({match_type}) in Campaign {campaign_id}, AdGroup {ad_group_id} @ ${bid:.2f}")
             return {"status": "dry_run_success"} # Mock response for dry run
 
         payload = [{
-            "campaignId": campaign_id,
-            "adGroupId": ad_group_id,
+            "campaignId": str(campaign_id),  # Ensure string
+            "adGroupId": str(ad_group_id),   # Ensure string
             "keywordText": keyword_text,
             "matchType": match_type,
             "state": "ENABLED",
@@ -145,21 +145,21 @@ class AmazonAdsClient:
 
         response_data = self._make_request("POST", "/v2/sp/keywords", payload)
         if response_data:
-            logger.info(f"✅ Created keyword: '{keyword_text}' (Campaign: {}, AdGroup: {}). Response: {}")
+            logger.info(f"✅ Created keyword: '{keyword_text}' (Campaign: {campaign_id}, AdGroup: {ad_group_id}). Response: {response_data}")
             return response_data
-        logger.error(f"❌ Failed to create keyword: '{keyword_text}' (Campaign: {}, AdGroup: {})")
+        logger.error(f"❌ Failed to create keyword: '{keyword_text}' (Campaign: {campaign_id}, AdGroup: {ad_group_id})")
         return None
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))
-    def create_negative_keyword(self, campaign_id: str, keyword_text: str,
+    def create_negative_keyword(self, campaign_id: Union[str, int], keyword_text: str,
                                 match_type: str = "NEGATIVE_EXACT") -> Optional[Dict]: # Return Optional[Dict]
         """Add negative keyword"""
         if settings.dry_run:
-            logger.info(f"[DRY RUN] Would add negative keyword: '{keyword_text}' ({match_type}) to Campaign {}")
+            logger.info(f"[DRY RUN] Would add negative keyword: '{keyword_text}' ({match_type}) to Campaign {campaign_id}")
             return {"status": "dry_run_success"} # Mock response for dry run
 
         payload = [{
-            "campaignId": campaign_id,
+            "campaignId": str(campaign_id),  # Ensure string
             "keywordText": keyword_text,
             "matchType": match_type,
             "state": "ENABLED"
@@ -167,9 +167,9 @@ class AmazonAdsClient:
 
         response_data = self._make_request("POST", "/v2/sp/campaignNegativeKeywords", payload)
         if response_data:
-            logger.info(f"✅ Added negative keyword: '{keyword_text}' (Campaign: {}). Response: {}")
+            logger.info(f"✅ Added negative keyword: '{keyword_text}' (Campaign: {campaign_id}). Response: {response_data}")
             return response_data
-        logger.error(f"❌ Failed to add negative keyword: '{keyword_text}' (Campaign: {})")
+        logger.error(f"❌ Failed to add negative keyword: '{keyword_text}' (Campaign: {campaign_id})")
         return None
 
     def batch_update_keyword_bids(self, bid_updates: List[Dict[str, Union[str, float]]]) -> Dict[str, int]:
