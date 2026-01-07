@@ -3,6 +3,8 @@ Amazon Advertising API client with automatic token refresh
 """
 import requests
 import time
+import json
+from decimal import Decimal
 from google.cloud import secretmanager
 from typing import List, Dict, Any, Optional, Union
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
@@ -12,12 +14,24 @@ from .logger import get_logger
 # Define logger at the module level, correctly using __name__
 logger = get_logger(__name__)
 
+def safe_serialize(obj):
+    """Convert any numeric types to JSON-safe types"""
+    if isinstance(obj, Decimal):
+        return float(obj)
+    elif isinstance(obj, (int, float)):
+        return float(obj) if isinstance(obj, float) else obj
+    elif isinstance(obj, dict):
+        return {k: safe_serialize(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [safe_serialize(item) for item in obj]
+    return obj
+
 class AmazonAdsClient:
     def __init__(self, client_id: str, client_secret: str, refresh_token: str, profile_id: str):
-        self.client_id = client_id
-        self.client_secret = client_secret
-        self.refresh_token = refresh_token
-        self.profile_id = profile_id
+        self.client_id = str(client_id)  # Ensure string
+        self.client_secret = str(client_secret)
+        self.refresh_token = str(refresh_token)
+        self.profile_id = str(profile_id)  # CRITICAL: profile_id must be string
         self.BASE_URL = "https://advertising-api.amazon.com"
         self.token_manager = self._init_token_manager()
 
@@ -40,18 +54,21 @@ class AmazonAdsClient:
         """
         url = f"{self.BASE_URL}{endpoint}"
 
+        # Sanitize payload to ensure all values are JSON-serializable
+        if payload:
+            payload = safe_serialize(payload)
+
         # CRITICAL DEBUGGING: Log payload with types
-        logger.debug(f"Sending {method} request to {url}")
-        logger.debug(f"Payload type: {type(payload)}")
-        logger.debug(f"Payload content: {payload}")
+        logger.info(f"🔍 API Request: {method} {endpoint}")
+        logger.info(f"📦 Payload: {json.dumps(payload, indent=2) if payload else 'None'}")
         
         # Deep inspection of payload structure
         if isinstance(payload, list) and len(payload) > 0:
             for idx, item in enumerate(payload):
-                logger.debug(f"Payload[{idx}] type: {type(item)}")
                 if isinstance(item, dict):
+                    logger.info(f"📋 Payload[{idx}] fields:")
                     for key, value in item.items():
-                        logger.debug(f"  {key}: {value} (type: {type(value).__name__})")
+                        logger.info(f"   • {key}: {value} (type: {type(value).__name__})")
 
         try:
             response = self._execute_request_once(method, url, payload)
@@ -75,43 +92,85 @@ class AmazonAdsClient:
                 raise e
 
             else:
-                logger.error(f"❌ HTTP Error {e.response.status_code} for {url}: {e.response.text}. Request Method: {method}, Payload: {payload}")
+                logger.error(f"❌ HTTP Error {e.response.status_code} for {url}: {e.response.text}")
+                logger.error(f"❌ Request payload was: {json.dumps(payload, indent=2) if payload else 'None'}")
                 return None
 
         except Exception as e:
-            logger.error(f"❌ Request to {url} failed. Error: {e}. Request Method: {method}, Payload: {payload}")
+            logger.error(f"❌ Request to {url} failed. Error: {e}")
+            logger.error(f"❌ Request payload was: {json.dumps(payload, indent=2) if payload else 'None'}")
             return None
+
+    def get_keyword_bid_recommendations(self, keyword_id: Union[str, int]) -> Optional[Dict]:
+        """
+        Get Amazon's suggested bid recommendations for a keyword.
+        Returns suggested bids for different match types and ad formats.
+        """
+        keyword_id = str(keyword_id)
+        endpoint = f"/v2/sp/keywords/{keyword_id}/bidRecommendations"
+        
+        logger.info(f"📊 Fetching bid recommendations for keyword {keyword_id}")
+        
+        response_data = self._make_request("GET", endpoint)
+        if response_data:
+            logger.info(f"✅ Got bid recommendations for keyword {keyword_id}: {response_data}")
+            return response_data
+        
+        logger.warning(f"⚠️ Could not get bid recommendations for keyword {keyword_id}")
+        return None
 
     @retry(stop=stop_after_attempt(5), wait=wait_exponential(multiplier=1, min=2, max=10),
            retry=retry_if_exception_type(requests.exceptions.HTTPError))
-    def update_keyword_bid(self, keyword_id: Union[str, int], new_bid: float) -> Optional[Dict]:
-        """Update existing keyword bid"""
+    def update_keyword_bid(self, keyword_id: Union[str, int], new_bid: float, 
+                          use_amazon_suggested: bool = False) -> Optional[Dict]:
+        """
+        Update existing keyword bid.
         
-        # Log what we received
-        logger.debug(f"update_keyword_bid called with keyword_id={keyword_id} (type: {type(keyword_id).__name__}), new_bid={new_bid} (type: {type(new_bid).__name__})")
+        Args:
+            keyword_id: The keyword ID to update
+            new_bid: The new bid amount (ignored if use_amazon_suggested=True)
+            use_amazon_suggested: If True, fetch and use Amazon's suggested bid
+        """
+        keyword_id_str = str(keyword_id)
+        
+        logger.info(f"🎯 update_keyword_bid called:")
+        logger.info(f"   keyword_id={keyword_id} (type: {type(keyword_id).__name__})")
+        logger.info(f"   new_bid={new_bid} (type: {type(new_bid).__name__})")
+        logger.info(f"   use_amazon_suggested={use_amazon_suggested}")
+        
+        # If using Amazon suggested bids, fetch the recommendation
+        if use_amazon_suggested:
+            recommendations = self.get_keyword_bid_recommendations(keyword_id_str)
+            if recommendations and 'suggestedBid' in recommendations:
+                new_bid = float(recommendations['suggestedBid'])
+                logger.info(f"📊 Using Amazon suggested bid: ${new_bid:.2f}")
+            else:
+                logger.warning(f"⚠️ Could not get Amazon suggested bid, using provided bid: ${new_bid:.2f}")
         
         if settings.dry_run:
             logger.info(f"[DRY RUN] Would update keyword {keyword_id} bid to ${new_bid:.2f}")
             return {"status": "dry_run_success"}
 
-        # Ensure keywordId is always a string
+        # Ensure all values are correct types
         processed_keyword_id = str(keyword_id)
-        
-        # Ensure bid is a float, not Decimal or other numeric type
         processed_bid = float(new_bid)
 
+        # Build payload with explicit type enforcement
         payload = [{
-            "keywordId": processed_keyword_id,
-            "bid": processed_bid,
-            "state": "ENABLED"
+            "keywordId": processed_keyword_id,  # Must be string
+            "bid": processed_bid,               # Must be float
+            "state": "ENABLED"                  # Must be string
         }]
 
         endpoint = "/v2/sp/keywords"
 
+        logger.info(f"📤 Sending update request for keyword {processed_keyword_id}")
         response_data = self._make_request("PUT", endpoint, payload)
+        
         if response_data:
             logger.info(f"✅ Updated keyword {keyword_id} bid to ${new_bid:.2f}. Response: {response_data}")
             return response_data
+        
         logger.error(f"❌ Failed to update keyword {keyword_id} bid to ${new_bid:.2f}")
         return None
 
@@ -120,8 +179,8 @@ class AmazonAdsClient:
         wait=wait_exponential(multiplier=1, min=2, max=10),
         retry=retry_if_exception_type(requests.exceptions.HTTPError)
     )
-    def create_keyword(self, campaign_id: Union[str, int], ad_group_id: Union[str, int], keyword_text: str,
-                       match_type: str, bid: float) -> Optional[Dict]:
+    def create_keyword(self, campaign_id: Union[str, int], ad_group_id: Union[str, int], 
+                       keyword_text: str, match_type: str, bid: float) -> Optional[Dict]:
         """Create a new keyword"""
         if settings.dry_run:
             logger.info(f"[DRY RUN] Would create keyword: '{keyword_text}' ({match_type}) in Campaign {campaign_id}, AdGroup {ad_group_id} @ ${bid:.2f}")
@@ -130,8 +189,8 @@ class AmazonAdsClient:
         payload = [{
             "campaignId": str(campaign_id),
             "adGroupId": str(ad_group_id),
-            "keywordText": keyword_text,
-            "matchType": match_type,
+            "keywordText": str(keyword_text),
+            "matchType": str(match_type),
             "state": "ENABLED",
             "bid": float(bid)
         }]
@@ -153,8 +212,8 @@ class AmazonAdsClient:
 
         payload = [{
             "campaignId": str(campaign_id),
-            "keywordText": keyword_text,
-            "matchType": match_type,
+            "keywordText": str(keyword_text),
+            "matchType": str(match_type),
             "state": "ENABLED"
         }]
 
@@ -165,25 +224,38 @@ class AmazonAdsClient:
         logger.error(f"❌ Failed to add negative keyword: '{keyword_text}' (Campaign: {campaign_id})")
         return None
 
-    def batch_update_keyword_bids(self, bid_updates: List[Dict[str, Union[str, float]]]) -> Dict[str, int]:
+    def batch_update_keyword_bids(self, bid_updates: List[Dict[str, Union[str, float, int]]], 
+                                  use_amazon_suggested: bool = False) -> Dict[str, int]:
         """
-        Batches multiple keyword bid updates into a single API call if possible,
-        or iterates if a batch endpoint is not available or desired.
-        For Amazon SP keywords, the PUT /v2/sp/keywords endpoint accepts a list.
+        Batches multiple keyword bid updates.
+        
+        Args:
+            bid_updates: List of dicts with 'keywordId' and 'bid' keys
+            use_amazon_suggested: If True, use Amazon's suggested bids instead of provided bids
         """
         if not bid_updates:
+            logger.warning("⚠️ No bid updates provided to batch_update_keyword_bids")
             return {"success": 0, "failed": 0}
 
+        logger.info(f"🔄 Processing {len(bid_updates)} bid updates (Amazon suggested: {use_amazon_suggested})")
+        
         success_count = 0
         failed_count = 0
         
         for update_item in bid_updates:
             keyword_id = update_item["keywordId"]
-            new_bid = update_item["bid"]
-            result = self.update_keyword_bid(keyword_id=keyword_id, new_bid=new_bid)
+            new_bid = update_item.get("bid", 0.0)
+            
+            result = self.update_keyword_bid(
+                keyword_id=keyword_id, 
+                new_bid=new_bid,
+                use_amazon_suggested=use_amazon_suggested
+            )
+            
             if result:
                 success_count += 1
             else:
                 failed_count += 1
         
+        logger.info(f"📊 Batch update complete: {success_count} success, {failed_count} failed")
         return {"success": success_count, "failed": failed_count}
