@@ -316,7 +316,7 @@ class BudgetMonitor:
 
             logger.info(
                 f"✅ Emergency bid reduction applied for campaign '{}': " # Fixed f-string
-                f"{} keywords updated, {failed_count} failed."
+                f"{} keywords updated, {failed_count} failed." # Fixed f-string
             )
 
         except Exception as e:
