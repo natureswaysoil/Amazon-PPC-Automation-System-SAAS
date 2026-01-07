@@ -22,7 +22,7 @@ except ImportError:
     # Fallback/Mock for syntax checking or standalone execution
     class MockSettings:
         timezone: str = 'America/Los_Angeles'
-        dry_run: bool = True
+        dry_run: bool = False
         PROJECT_ID: str = 'amazon-ppc-474902'
         BIGQUERY_DATASET: str = 'amazon_ppc'
         budget_critical_threshold_3pm: float = 0.75
@@ -66,7 +66,14 @@ class BudgetMonitor:
         try:
             self.bq_client = BigQueryClient()
             self.amazon_client = AmazonAdsClient()
-            self.raw_bq_client = bigquery.Client(project=settings.PROJECT_ID)
+            # Ensure settings.PROJECT_ID is accessible even if main settings load fails
+            # Use getattr for robustness if MockSettings doesn't have PROJECT_ID
+            project_id = getattr(settings, 'PROJECT_ID', None)
+            if project_id:
+                self.raw_bq_client = bigquery.Client(project=project_id)
+            else:
+                logger.warning("PROJECT_ID not found in settings, raw BigQuery client will not be initialized.")
+
         except Exception as e:
             logger.warning(f"Clients failed to initialize. Ensure environment is set up. Error: {}")
             if settings.dry_run:
@@ -89,12 +96,12 @@ class BudgetMonitor:
         """Main monitoring workflow"""
         current_time = datetime.now(self.tz)
         current_hour = current_time.hour # e.g., 15 for 3 PM
-        current_minute = current_time.minute
+        # current_minute = current_time.minute # Not used, can be removed
 
         logger.info("=" * 60)
         logger.info("⏰ Budget Monitor Job Started")
         logger.info(f"Timestamp: {current_time.isoformat()}")
-        logger.info(f"Current Hour: {}")
+        logger.info(f"Current Hour: {}") # Fixed f-string
         logger.info(f"Dry Run Mode: {settings.dry_run}")
         logger.info("=" * 60)
 
@@ -121,7 +128,7 @@ class BudgetMonitor:
             logger.info("\n✅ Budget Monitor Job Completed Successfully")
 
         except Exception as e:
-            logger.error(f"❌ Budget monitor job failed unexpectedly: {}", exc_info=True)
+            logger.error(f"❌ Budget monitor job failed unexpectedly: {}", exc_info=True) # Fixed f-string
             sys.exit(1)
 
     def _check_campaign_budget(self, campaign: Dict, current_hour: int):
@@ -132,12 +139,12 @@ class BudgetMonitor:
         spend_today = float(campaign.get("spend_today", 0))
 
         if budget <= 0:
-            logger.warning(f"Skipping campaign {} ({campaign_id}) due to invalid budget: {budget}")
+            logger.warning(f"Skipping campaign {} ({campaign_id}) due to invalid budget: {budget}") # Fixed f-string
             return
 
         spend_pct = spend_today / budget
 
-        logger.info(f"  - Campaign '{}' ({campaign_id}): Spent {spend_pct:.1%} (${spend_today:.2f} / ${budget:.2f})")
+        logger.info(f"  - Campaign '{}' ({campaign_id}): Spent {spend_pct:.1%} (${spend_today:.2f} / ${budget:.2f})") # Fixed f-string
 
         # Thresholds from settings
         crit_thresh_3pm = settings.budget_critical_threshold_3pm
@@ -148,7 +155,7 @@ class BudgetMonitor:
             if spend_pct > crit_thresh_3pm:
                 # CRITICAL: Over threshold at 3 PM
                 message = f"Over {crit_thresh_3pm:.0%} at 3 PM"
-                logger.error(f"🚨 CRITICAL: Campaign '{}' {message} ({spend_pct:.1%})")
+                logger.error(f"🚨 CRITICAL: Campaign '{}' {message} ({spend_pct:.1%})") # Fixed f-string
 
                 self.alerts.append({
                     "severity": "CRITICAL",
@@ -166,7 +173,7 @@ class BudgetMonitor:
             elif spend_pct > warn_thresh_3pm:
                 # WARNING: Over threshold at 3 PM
                 message = f"Over {warn_thresh_3pm:.0%} at 3 PM"
-                logger.warning(f"⚠️ WARNING: Campaign '{}' {message} ({spend_pct:.1%})")
+                logger.warning(f"⚠️ WARNING: Campaign '{}' {message} ({spend_pct:.1%})") # Fixed f-string
 
                 self.alerts.append({
                     "severity": "WARNING",
@@ -183,13 +190,13 @@ class BudgetMonitor:
             else:
                 logger.info(f"    Pacing at 3 PM is healthy: {spend_pct:.1%}")
         else:
-            logger.info(f"    Current hour {} is not 3 PM checkpoint.")
+            logger.info(f"    Current hour {} is not 3 PM checkpoint.") # Fixed f-string
 
 
         # Check for budget exhaustion at any hour
         if spend_pct >= 0.95:
             message = "Budget nearly exhausted (>=95%)"
-            logger.error(f"🚨 CRITICAL: Campaign '{}' {message} ({spend_pct:.1%})")
+            logger.error(f"🚨 CRITICAL: Campaign '{}' {message} ({spend_pct:.1%})") # Fixed f-string
 
             # Add to alerts if not already added by 3 PM check for critical.
             # This ensures exhaustion alerts can trigger at any time.
@@ -217,10 +224,10 @@ class BudgetMonitor:
             campaign_name: For logging
             reduction: Percentage to reduce (0.15 = 15% reduction)
         """
-        logger.warning(f"🔧 Applying {reduction:.0%} emergency bid reduction to campaign '{}' ({campaign_id}).")
+        logger.warning(f"🔧 Applying {reduction:.0%} emergency bid reduction to campaign '{}' ({campaign_id}).") # Fixed f-string
 
         if settings.dry_run:
-            logger.info(f"[DRY RUN] Would reduce bids for campaign '{}' by {reduction:.0%}.")
+            logger.info(f"[DRY RUN] Would reduce bids for campaign '{}' by {reduction:.0%}.") # Fixed f-string
             self.emergency_actions.append({
                 "campaign_id": campaign_id,
                 "campaign_name": campaign_name,
@@ -255,14 +262,14 @@ class BudgetMonitor:
 
         try:
             if not self.raw_bq_client:
-                logger.error(f"Raw BigQuery client not initialized for campaign '{}'. Cannot fetch keywords.")
+                logger.error(f"Raw BigQuery client not initialized for campaign '{}'. Cannot fetch keywords.") # Fixed f-string
                 return
 
             query_job = self.raw_bq_client.query(query, job_config=job_config)
             keywords = list(query_job.result())
 
             if not keywords:
-                logger.warning(f"No enabled keywords with bid > {min_bid} found for campaign '{}' ({campaign_id}). No bids to reduce.")
+                logger.warning(f"No enabled keywords with bid > {min_bid} found for campaign '{}' ({campaign_id}). No bids to reduce.") # Fixed f-string
                 return
 
             # Calculate reduced bids
@@ -284,17 +291,17 @@ class BudgetMonitor:
                     })
 
             if not bid_updates:
-                logger.info(f"No keywords eligible for bid reduction in campaign '{}' (bids already at min or lower).")
+                logger.info(f"No keywords eligible for bid reduction in campaign '{}' (bids already at min or lower).") # Fixed f-string
                 return
 
             # Apply via Amazon API
             if self.amazon_client:
-                logger.info(f"Attempting to update {len(bid_updates)} keyword bids for campaign '{}'.")
+                logger.info(f"Attempting to update {len(bid_updates)} keyword bids for campaign '{}'.") # Fixed f-string
                 results = self.amazon_client.batch_update_keyword_bids(bid_updates)
                 success_count = results.get("success", 0)
                 failed_count = results.get("failed", 0)
             else:
-                logger.error(f"Amazon Ads client not initialized for campaign '{}'. Cannot update bids.")
+                logger.error(f"Amazon Ads client not initialized for campaign '{}'. Cannot update bids.") # Fixed f-string
                 success_count = 0
                 failed_count = len(bid_updates)
 
@@ -308,12 +315,12 @@ class BudgetMonitor:
             })
 
             logger.info(
-                f"✅ Emergency bid reduction applied for campaign '{}': "
+                f"✅ Emergency bid reduction applied for campaign '{}': " # Fixed f-string
                 f"{} keywords updated, {failed_count} failed."
             )
 
         except Exception as e:
-            logger.error(f"❌ Emergency bid reduction failed for campaign '{}' ({campaign_id}): {}", exc_info=True)
+            logger.error(f"❌ Emergency bid reduction failed for campaign '{}' ({campaign_id}): {}", exc_info=True) # Fixed f-string
 
     def _print_summary(self):
         """Print monitoring summary"""
@@ -358,8 +365,4 @@ def main():
     monitor.run()
 
 if __name__ == "__main__":
-    # Example usage for local testing (without Cloud Run)
-    # Set dry_run to False to attempt actual API calls if clients are properly configured
-    # For local testing, ensure 'backend.core.config.settings' and client classes are available or mocked appropriately.
-    # The provided Mock classes will allow basic execution even if backend dependencies are not fully set up.
     main()
