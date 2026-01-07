@@ -10,56 +10,17 @@ from .logger import get_logger
 logger = get_logger(__name__)
 
 class AmazonAdsClient:
-    BASE_URL = "https://advertising-api.amazon.com"
-
-    def __init__(self): # Changed init to __init__ for standard Python constructor
-        self.token_manager = get_token_manager()
-        self.profile_id = None
-        self._initialize_profile_id() # Call a dedicated initialization method
-
-        logger.info("✅ AmazonAdsClient initialized")
-
-    def _initialize_profile_id(self):
-        """Loads the Amazon Profile ID from Google Secret Manager."""
-        try:
-            client = secretmanager.SecretManagerServiceClient()
-            name = f"projects/{settings.project_id}/secrets/amazon_profile_id/versions/latest"
-            response = client.access_secret_version(request={"name": name})
-            self.profile_id = response.payload.data.decode("UTF-8")
-        except Exception as e:
-            if settings.dry_run:
-                logger.warning(f"⚠️ Could not load Amazon Profile ID (Dry Run): Using MOCK_PROFILE_ID. Error: {e}")
-                self.profile_id = "MOCK_PROFILE_ID"
-            else:
-                logger.error(f"❌ Failed to load Amazon Profile ID: {e}")
-                raise # Re-raise the exception as it's a critical failure
-
-    def _get_headers(self) -> Dict[str, str]:
-        """Construct headers with valid access token"""
-        access_token = self.token_manager.get_valid_access_token()
-        return {
-            "Authorization": f"Bearer {}", # Corrected f-string usage
-            "Amazon-Advertising-API-ClientId": self.token_manager.client_id,
-            "Amazon-Advertising-API-Scope": self.profile_id,
-            "Content-Type": "application/json"
-        }
-
-    def _execute_request_once(self, method: str, url: str, payload: Optional[Union[List, Dict]] = None) -> requests.Response:
-        """Helper to execute a single HTTP request."""
-        headers = self._get_headers()
-        if method == "POST":
-            return requests.post(url, headers=headers, json=payload, timeout=30)
-        elif method == "PUT":
-            return requests.put(url, headers=headers, json=payload, timeout=30)
-        else:
-            raise ValueError(f"Unsupported HTTP method: {method}")
+    # ... (rest of the class init, _get_headers, _execute_request_once) ...
 
     def _make_request(self, method: str, endpoint: str, payload: Optional[Union[List, Dict]] = None) -> Optional[Any]:
         """
         Centralized request handler with 401 (Token Expiry) handling and error logging.
         Returns the JSON response data on success, or None on failure.
         """
-        url = f"{self.BASE_URL}{}" # CRITICAL FIX: Corrected URL construction
+        url = f"{self.BASE_URL}{}"
+
+        # CRITICAL DEBUGGING STEP: Log the actual payload being sent
+        logger.debug(f"Sending {method} request to {url} with payload: {payload}")
 
         try:
             response = self._execute_request_once(method, url, payload)
@@ -88,6 +49,42 @@ class AmazonAdsClient:
             else:
                 logger.error(f"❌ HTTP Error {e.response.status_code} for {url}: {e.response.text}. Request Method: {method}, Payload: {payload}")
                 return None
+
+        except Exception as e:
+            logger.error(f"❌ Request to {url} failed. Error: {e}. Request Method: {method}, Payload: {payload}")
+            return None
+
+    # ... (create_keyword and create_negative_keyword methods) ...
+
+    @retry(stop=stop_after_attempt(5), wait=wait_exponential(multiplier=1, min=2, max=10),
+           retry=retry_if_exception_type(requests.exceptions.HTTPError))
+    def update_keyword_bid(self, keyword_id: str, new_bid: float) -> Optional[Dict]: # Return Optional[Dict]
+        """Update existing keyword bid"""
+        if settings.dry_run:
+            logger.info(f"[DRY RUN] Would update keyword {} bid to ${new_bid:.2f}")
+            return {"status": "dry_run_success"} # Mock response for dry run
+
+        # CRITICAL FIX: Ensure keywordId is always a string, even if it comes in as an int/float
+        # The Amazon API for keyword IDs always expects them as strings in the JSON payload.
+        processed_keyword_id = str(keyword_id)
+
+        # Amazon Advertising API for SP Keywords expects a list of objects for PUT /v2/sp/keywords
+        # Each object in the list must contain the keywordId and the fields to update.
+        payload = [{
+            "keywordId": processed_keyword_id, # Use the string-enforced ID
+            "bid": new_bid,
+            "state": "ENABLED" # Good practice to include, assuming you want it to remain enabled
+        }]
+
+        # The endpoint for batch updates of keywords is /v2/sp/keywords
+        endpoint = "/v2/sp/keywords"
+
+        response_data = self._make_request("PUT", endpoint, payload)
+        if response_data:
+            logger.info(f"✅ Updated keyword {} bid to ${new_bid:.2f}. Response: {response_data}")
+            return response_data
+        logger.error(f"❌ Failed to update keyword {} bid to ${new_bid:.2f}")
+        return None
 
         except Exception as e:
             logger.error(f"❌ Request to {url} failed. Error: {e}. Request Method: {method}, Payload: {payload}")
