@@ -54,6 +54,23 @@ steps:
       - '--task-timeout=10m'
       - '--max-retries=1'
 
+  # Deploy Verify Live Data Job
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: gcloud
+    args:
+      - 'run'
+      - 'jobs'
+      - 'update'
+      - 'verify-live-data'
+      - '--image=gcr.io/$PROJECT_ID/amazon-ppc-automation:$SHORT_SHA'
+      - '--region=us-central1'
+      - '--command=python,-m,automation.verify_live_data'
+      - '--set-env-vars=GCP_PROJECT=$PROJECT_ID,BQ_DATASET=amazon_ppc'
+      - '--service-account=amazon-ppc-sa@$PROJECT_ID.iam.gserviceaccount.com'
+      - '--memory=512Mi'
+      - '--task-timeout=5m'
+      - '--max-retries=0'
+
 images:
   - 'gcr.io/$PROJECT_ID/amazon-ppc-automation:$SHORT_SHA'
   - 'gcr.io/$PROJECT_ID/amazon-ppc-automation:latest'

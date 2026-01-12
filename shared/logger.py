@@ -4,7 +4,7 @@ Structured logging for Cloud Run
 
 import logging
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 from .config import settings
 
 def get_logger(name: str) -> logging.Logger:
@@ -19,7 +19,7 @@ def get_logger(name: str) -> logging.Logger:
         class JsonFormatter(logging.Formatter):
             def format(self, record):
                 log_obj = {
-                    "timestamp": datetime.utcnow().isoformat(),
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
                     "severity": record.levelname,
                     "message": record.getMessage(),
                     "logger": record.name,

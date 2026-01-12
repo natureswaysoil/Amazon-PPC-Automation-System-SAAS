@@ -4,7 +4,7 @@ Stores refreshed tokens back to Secret Manager
 """
 
 import requests
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from google.cloud import secretmanager
 from typing import Optional
 import json
@@ -100,7 +100,11 @@ class TokenManager:
             return True
         
         # Refresh if within buffer time of expiry
-        time_until_expiry = (self.token_expires_at - datetime.utcnow()).total_seconds()
+        expires_at = self.token_expires_at
+        if expires_at.tzinfo is None or expires_at.tzinfo.utcoffset(expires_at) is None:
+            # Assume UTC for naive datetime
+            expires_at = expires_at.replace(tzinfo=timezone.utc)
+        time_until_expiry = (expires_at - datetime.now(timezone.utc)).total_seconds()
         needs_refresh = time_until_expiry < self.TOKEN_EXPIRY_BUFFER
         
         if needs_refresh:
@@ -130,7 +134,7 @@ class TokenManager:
             # Update tokens
             self.access_token = token_data["access_token"]
             expires_in = token_data.get("expires_in", 3600)  # Default 1 hour
-            self.token_expires_at = datetime.utcnow() + timedelta(seconds=expires_in)
+            self.token_expires_at = datetime.now(timezone.utc) + timedelta(seconds=expires_in)
             
             logger.info(f"✅ Access token refreshed (expires in {expires_in}s)")
             
@@ -173,7 +177,10 @@ class TokenManager:
                 "is_valid": False
             }
         
-        time_until_expiry = (self.token_expires_at - datetime.utcnow()).total_seconds()
+        expires_at = self.token_expires_at
+        if expires_at.tzinfo is None or expires_at.tzinfo.utcoffset(expires_at) is None:
+            expires_at = expires_at.replace(tzinfo=timezone.utc)
+        time_until_expiry = (expires_at - datetime.now(timezone.utc)).total_seconds()
         
         return {
             "has_access_token": bool(self.access_token),
