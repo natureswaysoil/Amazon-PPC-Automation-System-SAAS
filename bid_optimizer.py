@@ -15,18 +15,17 @@ sys.path.insert(0, '/app')
 
 # --- IMPORTS ---
 try:
-    from backend.core.config import settings, AOV_TIERS
-    from backend.aov_fetcher import aov_fetcher
-    # Assuming these exist in your project, otherwise we mock them for safety
-    from backend.shared.bigquery_client import BigQueryClient
-    from backend.shared.amazon_client import AmazonAdsClient
+    # Use automation/shared re-exports and local aov_fetcher
+    from automation.shared.config import settings
+    from shared.bigquery_client import BigQueryClient
+    from automation.shared.amazon_client import AmazonAdsClient
+    from aov_fetcher import aov_fetcher
 except ImportError as e:
     logging.warning(f"Import warning: {e}. Ensure PYTHONPATH is set correctly.")
-    # Mocks for standalone syntax checking
+    # Fallbacks for syntax checking
     settings = type('obj', (object,), {'timezone': 'America/Los_Angeles', 'dry_run': True, 'default_aov': 35.0})
     BigQueryClient = object
     AmazonAdsClient = object
-    AOV_TIERS = {}
 
 # Setup Logger
 logging.basicConfig(level=logging.INFO)
@@ -232,9 +231,7 @@ class BidOptimizer:
                             keyword_id=keyword["keywordId"],
                             old_bid=current_bid,
                             new_bid=optimal_bid,
-                            reason=result["reason"],
-                            changed_by="system",
-                            components=result["components"]
+                            reason=result["reason"]
                         )
                     
                     self.stats["bids_updated"] += 1

@@ -17,7 +17,8 @@ class AmazonAdsClient:
         Centralized request handler with 401 (Token Expiry) handling and error logging.
         Returns the JSON response data on success, or None on failure.
         """
-        url = f"{self.BASE_URL}{}"
+        # Build full URL from base and endpoint
+        url = f"{self.BASE_URL}{endpoint}"
 
         # CRITICAL DEBUGGING STEP: Log the actual payload being sent
         logger.debug(f"Sending {method} request to {url} with payload: {payload}")
@@ -38,7 +39,7 @@ class AmazonAdsClient:
                     retry_response.raise_for_status()
                     return retry_response.json() # Return JSON response body on retry success
                 except Exception as retry_e:
-                    logger.error(f"❌ Retry after token refresh failed for {url}. Error: {}. Response: {getattr(retry_e, 'response', None)}")
+                    logger.error(f"❌ Retry after token refresh failed for {url}. Error: {retry_e}. Response: {getattr(retry_e, 'response', None)}")
                     return None
 
             # Handle Rate Limiting (429) - Tenacity will catch this
@@ -58,37 +59,30 @@ class AmazonAdsClient:
 
     @retry(stop=stop_after_attempt(5), wait=wait_exponential(multiplier=1, min=2, max=10),
            retry=retry_if_exception_type(requests.exceptions.HTTPError))
-    def update_keyword_bid(self, keyword_id: str, new_bid: float) -> Optional[Dict]: # Return Optional[Dict]
+    def update_keyword_bid(self, keyword_id: Union[str, int], new_bid: float) -> Optional[Dict]:
         """Update existing keyword bid"""
+        # Honor dry-run mode
         if settings.dry_run:
-            logger.info(f"[DRY RUN] Would update keyword {} bid to ${new_bid:.2f}")
-            return {"status": "dry_run_success"} # Mock response for dry run
+            logger.info(f"[DRY RUN] Would update keyword {keyword_id} bid to ${new_bid:.2f}")
+            return {"status": "dry_run_success"}
 
-        # CRITICAL FIX: Ensure keywordId is always a string, even if it comes in as an int/float
-        # The Amazon API for keyword IDs always expects them as strings in the JSON payload.
+        # Ensure keywordId is a string (API expects string)
         processed_keyword_id = str(keyword_id)
 
-        # Amazon Advertising API for SP Keywords expects a list of objects for PUT /v2/sp/keywords
-        # Each object in the list must contain the keywordId and the fields to update.
         payload = [{
-            "keywordId": processed_keyword_id, # Use the string-enforced ID
-            "bid": new_bid,
-            "state": "ENABLED" # Good practice to include, assuming you want it to remain enabled
+            "keywordId": processed_keyword_id,
+            "bid": float(new_bid),
+            "state": "ENABLED"
         }]
 
-        # The endpoint for batch updates of keywords is /v2/sp/keywords
         endpoint = "/v2/sp/keywords"
 
         response_data = self._make_request("PUT", endpoint, payload)
         if response_data:
-            logger.info(f"✅ Updated keyword {} bid to ${new_bid:.2f}. Response: {response_data}")
+            logger.info(f"✅ Updated keyword {processed_keyword_id} bid to ${new_bid:.2f}. Response: {response_data}")
             return response_data
-        logger.error(f"❌ Failed to update keyword {} bid to ${new_bid:.2f}")
+        logger.error(f"❌ Failed to update keyword {processed_keyword_id} bid to ${new_bid:.2f}")
         return None
-
-        except Exception as e:
-            logger.error(f"❌ Request to {url} failed. Error: {e}. Request Method: {method}, Payload: {payload}")
-            return None
 
     @retry(
         stop=stop_after_attempt(5),
@@ -99,8 +93,8 @@ class AmazonAdsClient:
                        match_type: str, bid: float) -> Optional[Dict]: # Return Optional[Dict] for the response
         """Create a new keyword"""
         if settings.dry_run:
-            logger.info(f"[DRY RUN] Would create keyword: '{}' ({}) in Campaign {campaign_id}, AdGroup {ad_group_id} @ ${bid:.2f}")
-            return {"status": "dry_run_success"} # Mock response for dry run
+            logger.info(f"[DRY RUN] Would create keyword: '{keyword_text}' ({match_type}) in Campaign {campaign_id}, AdGroup {ad_group_id} @ ${bid:.2f}")
+            return {"status": "dry_run_success"}
 
         payload = [{
             "campaignId": campaign_id,
@@ -113,9 +107,9 @@ class AmazonAdsClient:
 
         response_data = self._make_request("POST", "/v2/sp/keywords", payload)
         if response_data:
-            logger.info(f"✅ Created keyword: '{}' (Campaign: {campaign_id}, AdGroup: {ad_group_id}). Response: {response_data}")
+            logger.info(f"✅ Created keyword: '{keyword_text}' (Campaign: {campaign_id}, AdGroup: {ad_group_id}). Response: {response_data}")
             return response_data
-        logger.error(f"❌ Failed to create keyword: '{}' (Campaign: {campaign_id}, AdGroup: {ad_group_id})")
+        logger.error(f"❌ Failed to create keyword: '{keyword_text}' (Campaign: {campaign_id}, AdGroup: {ad_group_id})")
         return None
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))
@@ -123,8 +117,8 @@ class AmazonAdsClient:
                                 match_type: str = "NEGATIVE_EXACT") -> Optional[Dict]: # Return Optional[Dict]
         """Add negative keyword"""
         if settings.dry_run:
-            logger.info(f"[DRY RUN] Would add negative keyword: '{}' ({}) to Campaign {campaign_id}")
-            return {"status": "dry_run_success"} # Mock response for dry run
+            logger.info(f"[DRY RUN] Would add negative keyword: '{keyword_text}' ({match_type}) to Campaign {campaign_id}")
+            return {"status": "dry_run_success"}
 
         payload = [{
             "campaignId": campaign_id,
@@ -135,41 +129,49 @@ class AmazonAdsClient:
 
         response_data = self._make_request("POST", "/v2/sp/campaignNegativeKeywords", payload)
         if response_data:
-            logger.info(f"✅ Added negative keyword: '{}' (Campaign: {campaign_id}). Response: {response_data}")
+            logger.info(f"✅ Added negative keyword: '{keyword_text}' (Campaign: {campaign_id}). Response: {response_data}")
             return response_data
-        logger.error(f"❌ Failed to add negative keyword: '{}' (Campaign: {campaign_id})")
+        logger.error(f"❌ Failed to add negative keyword: '{keyword_text}' (Campaign: {campaign_id})")
         return None
 
-    @retry(stop=stop_after_attempt(5), wait=wait_exponential(multiplier=1, min=2, max=10),
-           retry=retry_if_exception_type(requests.exceptions.HTTPError))
-    def update_keyword_bid(self, keyword_id: str, new_bid: float) -> Optional[Dict]: # Return Optional[Dict]
-        """Update existing keyword bid"""
+    def batch_update_keyword_bids(self, bid_updates: List[Dict[str, Any]]) -> Dict[str, int]:
+        """Batch update keyword bids via /v2/sp/keywords.
+
+        Expects a list of dicts like {"keywordId": <id>, "bid": <float>}. Returns counts.
+        Honors DRY_RUN by logging and not calling the API.
+        """
+        if not bid_updates:
+            return {"success": 0, "failed": 0}
+
+        # Normalize payload
+        payload = []
+        for upd in bid_updates:
+            kid = str(upd.get("keywordId")) if upd.get("keywordId") is not None else None
+            bid = float(upd.get("bid", 0.0))
+            if not kid:
+                continue
+            payload.append({
+                "keywordId": kid,
+                "bid": bid,
+                "state": "ENABLED"
+            })
+
         if settings.dry_run:
-            logger.info(f"[DRY RUN] Would update keyword {} bid to ${new_bid:.2f}")
-            return {"status": "dry_run_success"} # Mock response for dry run
+            logger.info(f"[DRY RUN] Would batch update {len(payload)} keyword bids")
+            return {"success": len(payload), "failed": 0}
 
-        # Amazon Advertising API for SP Keywords expects a list of objects for PUT /v2/sp/keywords
-        # Each object in the list must contain the keywordId and the fields to update.
-        payload = [{
-            "keywordId": keyword_id,
-            "bid": new_bid,
-            "state": "ENABLED" # Good practice to include, assuming you want it to remain enabled
-        }]
-
-        # The endpoint for batch updates of keywords is /v2/sp/keywords
-        endpoint = "/v2/sp/keywords"
-
-        response_data = self._make_request("PUT", endpoint, payload)
-        if response_data:
-            logger.info(f"✅ Updated keyword {} bid to ${new_bid:.2f}. Response: {response_data}")
-            return response_data
-        logger.error(f"❌ Failed to update keyword {} bid to ${new_bid:.2f}")
-        return None
-
-
-
-
-Evaluate
-
-Compare
+        response_data = self._make_request("PUT", "/v2/sp/keywords", payload)
+        if response_data is not None:
+            # Amazon returns a list of operation results; count success by status if present
+            try:
+                success = sum(1 for r in response_data if str(r.get("code", "")).startswith("SUCCESS") or r.get("status") == "SUCCESS")
+                failed = len(payload) - success
+            except Exception:
+                # Fallback if response is not a list
+                success = len(payload)
+                failed = 0
+            logger.info(f"✅ Batch updated keyword bids: {success} success, {failed} failed")
+            return {"success": success, "failed": failed}
+        logger.error("❌ Batch keyword bid update failed")
+        return {"success": 0, "failed": len(payload)}
 

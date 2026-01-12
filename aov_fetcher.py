@@ -14,7 +14,9 @@ from google.cloud import bigquery
 sys.path.insert(0, '/app')
 
 try:
-    from backend.core.config import AOV_TIERS, settings
+    from shared.config import settings
+    # Optional AOV_TIERS; not present in this repo by default
+    AOV_TIERS = {}
 except ImportError:
     # Fallback for local testing if config is missing
     AOV_TIERS = {}
@@ -41,13 +43,22 @@ class AOVFetcher:
     """Fetches and caches ASIN-level AOV data from BigQuery"""
     
     def __init__(self):
-        self.client = bigquery.Client(project=PROJECT_ID)
+        try:
+            self.client = bigquery.Client(project=PROJECT_ID)
+        except Exception as e:
+            logger.warning(f"BigQuery client init failed (likely missing credentials): {e}")
+            self.client = None
         self._aov_14d: Dict[str, AsinAOV] = {}
         self._aov_30d: Dict[str, AsinAOV] = {}
         
     def fetch_all(self) -> None:
         """Fetch both 14d and 30d AOV maps (call once per job run)"""
         logger.info("Fetching ASIN AOV data from BigQuery...")
+        if not self.client:
+            logger.warning("BigQuery client unavailable; skipping AOV fetch and using defaults.")
+            self._aov_14d = {}
+            self._aov_30d = {}
+            return
         
         # We fetch data excluding the last 3 days to avoid attribution lag.
         self._aov_14d = self._fetch_aov_window(days=14, min_orders=2)
@@ -87,6 +98,8 @@ class AOVFetcher:
         )
         
         try:
+            if not self.client:
+                return {}
             rows = self.client.query(query, job_config=job_config).result()
             result = {}
             

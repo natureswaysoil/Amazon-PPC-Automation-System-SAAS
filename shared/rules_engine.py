@@ -38,9 +38,7 @@ class BidCalculator:
     ) -> dict:
         """
         Main entry point for bid calculation.
-        Automatically classifies the performance tier internally.
         """
-        
         # 1. Determine Context
         if current_hour is None:
             current_hour = datetime.now(self.tz).hour
@@ -161,9 +159,3 @@ class BidCalculator:
         return f"tier_{tier}_opt"
 
 
-
-
-
-Evaluate
-
-Compare
