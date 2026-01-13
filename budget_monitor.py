@@ -301,7 +301,7 @@ class BudgetMonitor:
 
                 if new_bid < current_bid: # Only update if bid is actually reduced
                     bid_updates.append({
-                        "keywordId": keyword.get("keywordId"),
+                        "keywordId": str(keyword.get("keywordId")),
                         "bid": new_bid
                     })
 

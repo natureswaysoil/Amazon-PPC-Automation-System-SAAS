@@ -220,15 +220,16 @@ class BidOptimizer:
                     optimal_bid = result["optimal_bid"]
                     bid_change = optimal_bid - current_bid
                     
+                    # CRITICAL: Convert keywordId to string (Amazon API requirement)
                     bid_updates.append({
-                        "keywordId": keyword["keywordId"],
+                        "keywordId": str(keyword["keywordId"]),
                         "bid": optimal_bid
                     })
                     
                     # Log to BQ
                     if self.bq_client:
                         self.bq_client.log_bid_change(
-                            keyword_id=keyword["keywordId"],
+                            keyword_id=str(keyword["keywordId"]),
                             old_bid=current_bid,
                             new_bid=optimal_bid,
                             reason=result["reason"]

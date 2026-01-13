@@ -5,7 +5,10 @@ set -e
 PROJECT_ID="amazon-ppc-474902"
 REGION="us-central1"
 SERVICE_ACCOUNT="amazon-ppc-sa@${PROJECT_ID}.iam.gserviceaccount.com"
-IMAGE_URI="gcr.io/${PROJECT_ID}/amazon-ppc-automation:latest"
+# Use Artifact Registry (recommended) instead of legacy GCR
+IMAGE_BASE="us-central1-docker.pkg.dev/${PROJECT_ID}/ppc-automation/amazon-ppc-automation"
+IMAGE_LATEST="${IMAGE_BASE}:latest"
+IMAGE_TAG="${IMAGE_BASE}:$(date +%Y%m%d-%H%M%S)"
 
 echo "🚀 Starting Deployment for Project: $PROJECT_ID"
 echo "==================================================="
@@ -20,9 +23,20 @@ gcloud services enable \
     --project=$PROJECT_ID
 
 # 2. Build and Push Docker Image
-echo "📦 Building and Pushing Docker Image..."
-# We use standard gcloud build, tagging 'latest' explicitly for the schedulers to use
-gcloud builds submit --tag $IMAGE_URI --project=$PROJECT_ID .
+echo "📦 Building and Pushing Docker Image to Artifact Registry..."
+# Ensure Artifact Registry repository exists
+gcloud services enable artifactregistry.googleapis.com --project "$PROJECT_ID"
+gcloud artifacts repositories describe ppc-automation \
+    --location=$REGION \
+    --project="$PROJECT_ID" \
+    || gcloud artifacts repositories create ppc-automation \
+             --repository-format=docker \
+             --location=$REGION \
+             --description="PPC automation images" \
+             --project="$PROJECT_ID"
+
+# Build and push with both timestamp and latest tags
+gcloud builds submit --tag "$IMAGE_TAG" --tag "$IMAGE_LATEST" --project="$PROJECT_ID" .
 
 # 3. Deploy Cloud Run Jobs (Create or Update)
 echo "☁️  Deploying Cloud Run Jobs..."
@@ -31,10 +45,12 @@ echo "☁️  Deploying Cloud Run Jobs..."
 echo "   > Deploying Bid Optimizer..."
 # Try to update, if fail (doesn't exist), then create
 if ! gcloud run jobs update bid-optimizer \
-    --image=$IMAGE_URI \
+    --image="$IMAGE_LATEST" \
     --region=$REGION \
-    --command=python,-m,automation.jobs.bid_optimizer \
+    --command=python \
+    --args=bid_optimizer.py \
     --set-env-vars=GCP_PROJECT=$PROJECT_ID,BQ_DATASET=amazon_ppc,DRY_RUN=false \
+    --service-account=$SERVICE_ACCOUNT \
     --memory=2Gi \
     --task-timeout=30m \
     --max-retries=2 \
@@ -42,9 +58,10 @@ if ! gcloud run jobs update bid-optimizer \
 
     echo "     (Job not found, creating new...)"
     gcloud run jobs create bid-optimizer \
-        --image=$IMAGE_URI \
+        --image="$IMAGE_LATEST" \
         --region=$REGION \
-        --command=python,-m,automation.jobs.bid_optimizer \
+        --command=python \
+        --args=bid_optimizer.py \
         --set-env-vars=GCP_PROJECT=$PROJECT_ID,BQ_DATASET=amazon_ppc,DRY_RUN=false \
         --service-account=$SERVICE_ACCOUNT \
         --memory=2Gi \
@@ -56,19 +73,22 @@ fi
 # --- Job: Budget Monitor ---
 echo "   > Deploying Budget Monitor..."
 if ! gcloud run jobs update budget-monitor \
-    --image=$IMAGE_URI \
+    --image="$IMAGE_LATEST" \
     --region=$REGION \
-    --command=python,-m,automation.jobs.budget_monitor \
+    --command=python \
+    --args=budget_monitor.py \
     --set-env-vars=GCP_PROJECT=$PROJECT_ID,BQ_DATASET=amazon_ppc,DRY_RUN=false \
+    --service-account=$SERVICE_ACCOUNT \
     --memory=1Gi \
     --task-timeout=10m \
     --project=$PROJECT_ID 2>/dev/null; then
 
     echo "     (Job not found, creating new...)"
     gcloud run jobs create budget-monitor \
-        --image=$IMAGE_URI \
+        --image="$IMAGE_LATEST" \
         --region=$REGION \
-        --command=python,-m,automation.jobs.budget_monitor \
+        --command=python \
+        --args=budget_monitor.py \
         --set-env-vars=GCP_PROJECT=$PROJECT_ID,BQ_DATASET=amazon_ppc,DRY_RUN=false \
         --service-account=$SERVICE_ACCOUNT \
         --memory=1Gi \
@@ -79,19 +99,22 @@ fi
 # --- Job: Keyword Harvester ---
 echo "   > Deploying Keyword Harvester..."
 if ! gcloud run jobs update keyword-harvester \
-    --image=$IMAGE_URI \
+    --image="$IMAGE_LATEST" \
     --region=$REGION \
-    --command=python,-m,automation.jobs.keyword_harvester \
+    --command=python \
+    --args=automation/min_winning_bid.py \
     --set-env-vars=GCP_PROJECT=$PROJECT_ID,BQ_DATASET=amazon_ppc,DRY_RUN=false \
+    --service-account=$SERVICE_ACCOUNT \
     --memory=1Gi \
     --task-timeout=15m \
     --project=$PROJECT_ID 2>/dev/null; then
 
     echo "     (Job not found, creating new...)"
     gcloud run jobs create keyword-harvester \
-        --image=$IMAGE_URI \
+        --image="$IMAGE_LATEST" \
         --region=$REGION \
-        --command=python,-m,automation.jobs.keyword_harvester \
+        --command=python \
+        --args=automation/min_winning_bid.py \
         --set-env-vars=GCP_PROJECT=$PROJECT_ID,BQ_DATASET=amazon_ppc,DRY_RUN=false \
         --service-account=$SERVICE_ACCOUNT \
         --memory=1Gi \
