@@ -43,7 +43,6 @@ steps:
       - '--cpu-boost'
 
   # 4. Deploy Bid Optimizer Job
-  # Note: The job must be created manually once via 'gcloud run jobs create'
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
     entrypoint: gcloud
     args:
@@ -53,7 +52,6 @@ steps:
       - 'bid-optimizer'
       - '--image=gcr.io/$PROJECT_ID/amazon-ppc-automation:$SHORT_SHA'
       - '--region=us-central1'
-      # FIX: Point to the specific file name in the root directory
       - '--command=python,bid_optimizer.py'
       - '--set-env-vars=GCP_PROJECT=$PROJECT_ID,BQ_DATASET=amazon_ppc,DRY_RUN=false'
       - '--service-account=amazon-ppc-sa@$PROJECT_ID.iam.gserviceaccount.com'
@@ -71,7 +69,6 @@ steps:
       - 'budget-monitor'
       - '--image=gcr.io/$PROJECT_ID/amazon-ppc-automation:$SHORT_SHA'
       - '--region=us-central1'
-      # FIX: Point to the specific file name in the root directory
       - '--command=python,budget_monitor.py'
       - '--set-env-vars=GCP_PROJECT=$PROJECT_ID,BQ_DATASET=amazon_ppc,DRY_RUN=false'
       - '--service-account=amazon-ppc-sa@$PROJECT_ID.iam.gserviceaccount.com'
