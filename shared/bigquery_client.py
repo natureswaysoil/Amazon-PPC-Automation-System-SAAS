@@ -29,7 +29,7 @@ class BigQueryClient:
           advertisedAsin AS asin,
           SAFE_DIVIDE(SUM(sales), NULLIF(SUM(purchases), 0)) AS aov
         FROM `{self.project_id}.{self.dataset_id}.sp_advertised_product_metrics`
-        WHERE segments_date BETWEEN DATE_SUB(CURRENT_DATE(), INTERVAL @days + 3 DAY) 
+        WHERE date BETWEEN DATE_SUB(CURRENT_DATE(), INTERVAL @days + 3 DAY) 
                                 AND DATE_SUB(CURRENT_DATE(), INTERVAL 3 DAY)
         GROUP BY asin
         HAVING SUM(purchases) >= @min_orders
@@ -134,7 +134,7 @@ class BigQueryClient:
             SAFE_DIVIDE(SUM(st.cost), NULLIF(SUM(st.sales), 0)) as acos,
             SAFE_DIVIDE(SUM(st.purchases), NULLIF(SUM(st.clicks), 0)) as cvr
           FROM `{self.project_id}.{self.dataset_id}.sp_search_term_metrics` st
-          WHERE st.segments_date >= DATE_SUB(CURRENT_DATE(), INTERVAL @days DAY)
+          WHERE st.date >= DATE_SUB(CURRENT_DATE(), INTERVAL @days DAY)
           GROUP BY 1,2,3,4
         ),
         existing_keywords AS (
@@ -177,7 +177,7 @@ class BigQueryClient:
           SUM(st.clicks) as clicks,
           SUM(st.cost) as spend
         FROM `{self.project_id}.{self.dataset_id}.sp_search_term_metrics` st
-        WHERE st.segments_date >= DATE_SUB(CURRENT_DATE(), INTERVAL 30 DAY)
+        WHERE st.date >= DATE_SUB(CURRENT_DATE(), INTERVAL 30 DAY)
         GROUP BY 1,2
         HAVING clicks >= 15 AND SUM(st.purchases) = 0
         LIMIT 50
