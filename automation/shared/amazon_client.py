@@ -68,10 +68,12 @@ class AmazonAdsClient:
 
         # Ensure keywordId is a string (API expects string)
         processed_keyword_id = str(keyword_id)
+        # Round bid to 2 decimal places
+        bid_value = round(float(new_bid), 2)
 
         payload = [{
             "keywordId": processed_keyword_id,
-            "bid": float(new_bid),
+            "bid": bid_value,
             "state": "ENABLED"
         }]
 
@@ -147,12 +149,12 @@ class AmazonAdsClient:
         payload = []
         for upd in bid_updates:
             kid = str(upd.get("keywordId")) if upd.get("keywordId") is not None else None
-            bid = float(upd.get("bid", 0.0))
-            if not kid:
+            bid_value = round(float(upd.get("bid", 0.0)), 2)
+            if not kid or bid_value <= 0:
                 continue
             payload.append({
                 "keywordId": kid,
-                "bid": bid,
+                "bid": bid_value,
                 "state": "ENABLED"
             })
 
