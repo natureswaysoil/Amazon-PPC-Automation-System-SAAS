@@ -75,15 +75,15 @@ class AOVFetcher:
         query = f"""
         SELECT
           advertisedAsin AS asin,
-          SAFE_DIVIDE(SUM(sales), NULLIF(SUM(orders), 0)) AS aov,
-          SUM(orders) AS orders,
-          SUM(sales) AS sales,
-          COUNT(DISTINCT segments_date) AS active_days
-        FROM `{PROJECT_ID}.{DATASET}.{TABLE}`
+          SAFE_DIVIDE(SUM(attributedSales14d), NULLIF(SUM(attributedConversions14d), 0)) AS aov,
+          SUM(attributedConversions14d) AS orders,
+          SUM(attributedSales14d) AS sales,
+          COUNT(DISTINCT date) AS active_days
+        FROM `{PROJECT_ID}.{DATASET}.sp_advertised_product_metrics`
         WHERE 
-          segments_date BETWEEN DATE_SUB(CURRENT_DATE(), INTERVAL @days + 3 DAY) 
+          date BETWEEN DATE_SUB(CURRENT_DATE(), INTERVAL @days + 3 DAY) 
                             AND DATE_SUB(CURRENT_DATE(), INTERVAL 3 DAY)
-          AND sales > 0
+          AND attributedSales14d > 0
         GROUP BY asin
         HAVING 
           orders >= @min_orders
