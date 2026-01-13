@@ -59,47 +59,44 @@ class BigQueryClient:
         query = f"""
         WITH keyword_metrics AS (
           SELECT
-            k.keywordId,
-            k.adGroupId,
-            k.campaignId,
-            k.keywordText,
-            k.matchType,
+            k.keyword_id as keywordId,
+            k.ad_group_id as adGroupId,
+            k.campaign_id as campaignId,
+            k.keyword_text as keywordText,
+            k.match_type as matchType,
             k.bid as current_bid,
             k.state,
             
             -- Performance metrics
             COALESCE(SUM(m.clicks), 0) as clicks,
             COALESCE(SUM(m.cost), 0) as spend,
-            COALESCE(SUM(m.purchases), 0) as conversions,
-            COALESCE(SUM(m.sales), 0) as sales,
+            COALESCE(SUM(m.attributedConversions14d), 0) as conversions,
+            COALESCE(SUM(m.attributedSales14d), 0) as sales,
             
             -- Calculated metrics
-            SAFE_DIVIDE(SUM(m.purchases), NULLIF(SUM(m.clicks), 0)) as cvr,
-            SAFE_DIVIDE(SUM(m.cost), NULLIF(SUM(m.sales), 0)) as acos
+            SAFE_DIVIDE(SUM(m.attributedConversions14d), NULLIF(SUM(m.clicks), 0)) as cvr,
+            SAFE_DIVIDE(SUM(m.cost), NULLIF(SUM(m.attributedSales14d), 0)) as acos
             
-          FROM `{self.project_id}.{self.dataset_id}.sp_keywords` k
-          LEFT JOIN `{self.project_id}.{self.dataset_id}.sp_targeting_metrics` m
-            ON k.keywordId = m.targetId
-            AND m.segments_date BETWEEN DATE_SUB(CURRENT_DATE(), INTERVAL @days_lookback + 3 DAY) 
+          FROM `{self.project_id}.{self.dataset_id}.keywords` k
+          LEFT JOIN `{self.project_id}.{self.dataset_id}.keyword_performance` m
+            ON k.keyword_id = m.keywordId
+            AND m.date BETWEEN DATE_SUB(CURRENT_DATE(), INTERVAL @days_lookback + 3 DAY) 
                                     AND DATE_SUB(CURRENT_DATE(), INTERVAL 3 DAY)
-          WHERE k.state = 'ENABLED'
+          WHERE k.state = 'enabled'
           GROUP BY 1,2,3,4,5,6,7
         ),
         
         keyword_asins AS (
           SELECT DISTINCT
-            t.targetId as keywordId,
-            a.advertisedAsin
-          FROM `{self.project_id}.{self.dataset_id}.sp_targeting_metrics` t
-          INNER JOIN `{self.project_id}.{self.dataset_id}.sp_advertised_product_metrics` a
-            ON t.campaignId = a.campaignId
-            AND t.segments_date = a.segments_date
-          WHERE t.segments_date >= DATE_SUB(CURRENT_DATE(), INTERVAL 30 DAY)
+            m.keywordId,
+            'PLACEHOLDER' as advertisedAsin
+          FROM `{self.project_id}.{self.dataset_id}.keyword_performance` m
+          WHERE m.date >= DATE_SUB(CURRENT_DATE(), INTERVAL 30 DAY)
         )
         
         SELECT
           km.*,
-          ka.advertisedAsin
+          COALESCE(ka.advertisedAsin, 'UNKNOWN') as advertisedAsin
         FROM keyword_metrics km
         LEFT JOIN keyword_asins ka ON km.keywordId = ka.keywordId
         WHERE km.clicks >= @min_clicks OR km.conversions > 0
@@ -196,14 +193,14 @@ class BigQueryClient:
         """Get today's spend vs budget"""
         query = f"""
         SELECT
-          c.campaignId,
+          c.campaign_id as campaignId,
           c.name as campaign_name,
           c.budget,
           COALESCE(SUM(m.cost), 0) as spend_today
-        FROM `{self.project_id}.{self.dataset_id}.sp_campaigns` c
-        LEFT JOIN `{self.project_id}.{self.dataset_id}.sp_campaign_metrics` m
-          ON c.campaignId = m.campaignId AND m.segments_date = CURRENT_DATE()
-        WHERE c.state = 'ENABLED' AND c.budgetType = 'DAILY'
+        FROM `{self.project_id}.{self.dataset_id}.campaigns` c
+        LEFT JOIN `{self.project_id}.{self.dataset_id}.campaign_performance` m
+          ON c.campaign_id = m.campaignId AND m.date = CURRENT_DATE()
+        WHERE c.state = 'enabled' AND c.budget_type = 'daily'
         GROUP BY 1,2,3
         """
         try:
