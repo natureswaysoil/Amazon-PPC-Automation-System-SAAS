@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 from automation.shared.token_manager import TokenManager
 
 class TestTokenManager:
-    @patch('automation.shared.token_manager.secretmanager.SecretManagerServiceClient')
+    @patch('shared.token_manager.secretmanager.SecretManagerServiceClient')
     def test_needs_refresh_no_token(self, mock_sm):
         """Test refresh needed when no token exists"""
         manager = TokenManager()
@@ -16,7 +16,7 @@ class TestTokenManager:
         
         assert manager._needs_refresh() == True
     
-    @patch('automation.shared.token_manager.secretmanager.SecretManagerServiceClient')
+    @patch('shared.token_manager.secretmanager.SecretManagerServiceClient')
     def test_needs_refresh_expired(self, mock_sm):
         """Test refresh needed when token expired"""
         manager = TokenManager()
@@ -25,7 +25,7 @@ class TestTokenManager:
         
         assert manager._needs_refresh() == True
     
-    @patch('automation.shared.token_manager.secretmanager.SecretManagerServiceClient')
+    @patch('shared.token_manager.secretmanager.SecretManagerServiceClient')
     def test_needs_refresh_valid(self, mock_sm):
         """Test no refresh needed for valid token"""
         manager = TokenManager()

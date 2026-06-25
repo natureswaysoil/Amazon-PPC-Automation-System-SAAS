@@ -1,85 +1,87 @@
 """
-Tests for main.py health check server
+Tests for main.py — the Cloud Run service HTTP dispatcher.
+
+Verifies health checks AND that the scheduler POST routes (which previously
+returned 501) are now handled.
 """
 
-import unittest
+import json
 import os
 import sys
+import time
+import unittest
 from http.client import HTTPConnection
 from threading import Thread
-import time
 
-# Add parent directory to path
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import main
 
+PORT = 8888
 
-class TestMainHealthCheck(unittest.TestCase):
-    """Test the main.py health check server"""
-    
+
+class TestMainDispatcher(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        """Start server in background thread"""
-        os.environ['PORT'] = '8888'  # Use non-standard port for testing
+        os.environ["PORT"] = str(PORT)
         cls.server_thread = Thread(target=main.main, daemon=True)
         cls.server_thread.start()
-        
-        # Wait for server to be ready with retry logic
-        max_retries = 10
-        for i in range(max_retries):
+        for i in range(10):
             try:
-                conn = HTTPConnection('localhost', 8888, timeout=1)
-                conn.request('GET', '/health')
-                response = conn.getresponse()
-                conn.close()
-                if response.status == 200:
+                conn = HTTPConnection("localhost", PORT, timeout=1)
+                conn.request("GET", "/health")
+                if conn.getresponse().status == 200:
+                    conn.close()
                     break
+                conn.close()
             except Exception:
-                if i == max_retries - 1:
+                if i == 9:
                     raise
                 time.sleep(0.5)
-    
+
+    def _request(self, method, path):
+        conn = HTTPConnection("localhost", PORT, timeout=30)
+        try:
+            conn.request(method, path)
+            resp = conn.getresponse()
+            return resp.status, resp.read().decode()
+        finally:
+            conn.close()
+
+    # --- health ---
     def test_health_endpoint(self):
-        """Test /health endpoint returns 200"""
-        conn = HTTPConnection('localhost', 8888)
-        try:
-            conn.request('GET', '/health')
-            response = conn.getresponse()
-            
-            self.assertEqual(response.status, 200)
-            body = response.read().decode()
-            self.assertIn('OK', body)
-            self.assertIn('Amazon PPC Automation System', body)
-        finally:
-            conn.close()
-    
+        status, body = self._request("GET", "/health")
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["status"], "ok")
+
     def test_root_endpoint(self):
-        """Test / endpoint returns 200"""
-        conn = HTTPConnection('localhost', 8888)
-        try:
-            conn.request('GET', '/')
-            response = conn.getresponse()
-            
-            self.assertEqual(response.status, 200)
-            body = response.read().decode()
-            self.assertIn('OK', body)
-        finally:
-            conn.close()
-    
-    def test_not_found(self):
-        """Test unknown endpoint returns 404"""
-        conn = HTTPConnection('localhost', 8888)
-        try:
-            conn.request('GET', '/unknown')
-            response = conn.getresponse()
-            
-            self.assertEqual(response.status, 404)
-            body = response.read().decode()
-            self.assertIn('Not Found', body)
-        finally:
-            conn.close()
+        status, body = self._request("GET", "/")
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["status"], "ok")
+
+    def test_get_unknown_is_404(self):
+        status, body = self._request("GET", "/nope")
+        self.assertEqual(status, 404)
+        self.assertEqual(json.loads(body)["status"], "not_found")
+
+    # --- POST dispatch (previously 501) ---
+    def test_post_unknown_is_404(self):
+        status, body = self._request("POST", "/not-a-route")
+        self.assertEqual(status, 404)
+
+    def test_post_harvest_keywords_handled(self):
+        # No harvester implemented yet -> graceful 200, NOT 501
+        status, body = self._request("POST", "/harvest-keywords")
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["status"], "not_implemented")
+
+    def test_post_optimize_bids_routes(self):
+        # Without GCP creds the job degrades to "no keywords" and returns ok;
+        # the point is it is dispatched and does not return 501.
+        status, body = self._request("POST", "/optimize-bids")
+        self.assertNotEqual(status, 501)
+        self.assertIn(status, (200, 500))
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     unittest.main()

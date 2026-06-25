@@ -1,76 +1,138 @@
 """
-Main entry point for the container.
+HTTP entry point for the Cloud Run **service**.
 
-This provides a simple HTTP server for Cloud Run service health checks.
-The actual job logic is in bid_optimizer.py and budget_monitor.py,
-which are executed via Cloud Run Jobs with custom --command flags.
+Cloud Scheduler triggers optimization by POSTing to route paths on this
+service (e.g. POST /optimize-bids). The previous version only implemented
+GET for health checks, so every scheduled POST returned 501 and the jobs
+never ran. This dispatcher maps each route to its job runner.
+
+Routes:
+    GET  /              -> health check
+    GET  /health        -> health check
+    POST /optimize-bids -> bid_optimizer.main()
+    POST /monitor-budget-> budget_monitor.main()
+    POST /harvest-keywords -> keyword harvester (graceful no-op if absent)
+
+Jobs run synchronously within the request (Cloud Run keeps CPU allocated
+during a request; background work after the response can be throttled, so
+inline is the safe choice). Job runners may call sys.exit(1) on failure;
+that SystemExit is caught here and turned into an HTTP 500.
 """
 
+import json
 import os
 import sys
-from http.server import HTTPServer, BaseHTTPRequestHandler
+import time
 import logging
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-# Configure logging to flush immediately to stdout for Cloud Run
+# Make the app root importable (Dockerfile WORKDIR is /app)
+sys.path.insert(0, "/app")
+
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    stream=sys.stdout
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    stream=sys.stdout,
 )
 logger = logging.getLogger(__name__)
 
 
-class HealthCheckHandler(BaseHTTPRequestHandler):
-    """Minimal HTTP handler for health checks"""
-    
+def _run_optimize_bids():
+    from bid_optimizer import main as run
+    run()
+    return {"job": "optimize-bids", "status": "ok"}
+
+
+def _run_monitor_budget():
+    from budget_monitor import main as run
+    run()
+    return {"job": "monitor-budget", "status": "ok"}
+
+
+def _run_harvest_keywords():
+    # No harvester module exists yet. Respond honestly without hard-failing
+    # the scheduler every hour. Wire this up when keyword_harvester lands.
+    try:
+        from keyword_harvester import main as run  # type: ignore
+    except Exception:
+        logger.info("harvest-keywords requested but no harvester is implemented yet")
+        return {"job": "harvest-keywords", "status": "not_implemented"}
+    run()
+    return {"job": "harvest-keywords", "status": "ok"}
+
+
+# Map POST routes to job runners
+ROUTES = {
+    "/optimize-bids": _run_optimize_bids,
+    "/monitor-budget": _run_monitor_budget,
+    "/harvest-keywords": _run_harvest_keywords,
+}
+
+
+class Handler(BaseHTTPRequestHandler):
+    def _send(self, code, body):
+        payload = json.dumps(body).encode("utf-8")
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        try:
+            self.wfile.write(payload)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+
     def do_GET(self):
-        """Handle GET requests"""
-        if self.path == "/" or self.path == "/health":
-            self.send_response(200)
-            self.send_header("Content-type", "text/plain")
-            self.end_headers()
-            try:
-                self.wfile.write(b"OK - Amazon PPC Automation System\n")
-                self.wfile.write(b"This container is designed for Cloud Run Jobs.\n")
-                self.wfile.write(b"See bid_optimizer.py and budget_monitor.py for job logic.\n")
-            except (BrokenPipeError, ConnectionResetError):
-                # Client closed connection early, ignore
-                pass
+        if self.path in ("/", "/health"):
+            self._send(200, {"status": "ok", "service": "amazon-ppc-automation"})
         else:
-            self.send_response(404)
-            self.send_header("Content-type", "text/plain")
-            self.end_headers()
+            self._send(404, {"status": "not_found", "path": self.path})
+
+    def do_POST(self):
+        # Normalize path (ignore any query string)
+        path = self.path.split("?", 1)[0].rstrip("/") or "/"
+        runner = ROUTES.get(path)
+        if runner is None:
+            self._send(404, {"status": "not_found", "path": path})
+            return
+
+        # Drain request body if present (scheduler may send one)
+        length = int(self.headers.get("Content-Length", 0) or 0)
+        if length:
             try:
-                self.wfile.write(b"Not Found\n")
-            except (BrokenPipeError, ConnectionResetError):
-                # Client closed connection early, ignore
+                self.rfile.read(length)
+            except Exception:
                 pass
-    
-    def log_message(self, format, *args):
-        """Override to use Python logging"""
-        logger.info(f"{self.address_string()} - {format}", *args)
+
+        logger.info("▶️ Running job for %s", path)
+        started = time.time()
+        try:
+            result = runner()
+            result["duration_s"] = round(time.time() - started, 2)
+            logger.info("✅ Job %s finished in %.2fs", path, result["duration_s"])
+            self._send(200, result)
+        except SystemExit as e:
+            # Job runners call sys.exit(1) on failure
+            code = e.code if isinstance(e.code, int) else 1
+            dur = round(time.time() - started, 2)
+            logger.error("❌ Job %s exited with code %s after %.2fs", path, code, dur)
+            self._send(500, {"status": "failed", "path": path, "exit_code": code, "duration_s": dur})
+        except Exception as e:
+            dur = round(time.time() - started, 2)
+            logger.exception("❌ Job %s raised after %.2fs", path, dur)
+            self._send(500, {"status": "error", "path": path, "error": str(e), "duration_s": dur})
+
+    def log_message(self, fmt, *args):
+        logger.info("%s - %s", self.address_string(), fmt % args)
 
 
 def main():
-    """Start HTTP server on PORT from environment"""
     port = int(os.environ.get("PORT", 8080))
-    
-    logger.info(f"Starting health check server on port {port}")
-    logger.info("Note: This container is designed for Cloud Run Jobs")
-    logger.info("Jobs should use --command=python,<job_script>.py")
-    
-    # Create and bind the server
-    server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
-    
-    # Log that server is ready to accept connections
-    logger.info(f"Server successfully bound to 0.0.0.0:{port}")
-    logger.info("Server is ready to accept connections")
-    sys.stdout.flush()  # Ensure logs are immediately visible to Cloud Run
-    
+    server = ThreadingHTTPServer(("0.0.0.0", port), Handler)
+    logger.info("Listening on 0.0.0.0:%s (routes: %s)", port, ", ".join(sorted(ROUTES)))
+    sys.stdout.flush()
     try:
         server.serve_forever()
     except KeyboardInterrupt:
-        logger.info("Shutting down server")
         server.shutdown()
 
 

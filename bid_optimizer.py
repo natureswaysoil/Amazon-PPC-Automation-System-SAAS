@@ -1,296 +1,220 @@
 """
-Main bid optimization job
-Runs hourly via Cloud Scheduler
+Main bid optimization job (runs hourly via Cloud Scheduler / Cloud Run Job).
+
+Multi-tenant: the job optimizes ONE tenant per invocation. The tenant is
+either passed in (programmatic) or loaded from the environment (tenant_from_env).
+The Amazon client is built from that tenant's own credentials, and bid math
+comes from the single canonical BidCalculator in shared/rules_engine.py.
 """
 
 import sys
-import os
-from datetime import datetime
-import pytz
 import logging
+from datetime import datetime
 from typing import List, Dict, Optional
 
-# Add project root to path
-sys.path.insert(0, '/app')
+import pytz
 
-# --- IMPORTS ---
+# Ensure the container root is importable
+sys.path.insert(0, "/app")
+
 try:
-    # Use automation/shared re-exports and local aov_fetcher
     from automation.shared.config import settings
+    from automation.shared.rules_engine import BidCalculator
+    from automation.shared.amazon_client import AmazonAdsClient  # noqa: F401
+    from automation.shared.tenant import TenantConfig, tenant_from_env, build_amazon_client
     from shared.bigquery_client import BigQueryClient
-    from automation.shared.amazon_client import AmazonAdsClient
-    from aov_fetcher import aov_fetcher
-except ImportError as e:
+    try:
+        from aov_fetcher import aov_fetcher
+    except Exception:  # optional dependency
+        aov_fetcher = None
+except ImportError as e:  # pragma: no cover - import guard for local syntax checks
     logging.warning(f"Import warning: {e}. Ensure PYTHONPATH is set correctly.")
-    # Fallbacks for syntax checking
-    settings = type('obj', (object,), {'timezone': 'America/Los_Angeles', 'dry_run': True, 'default_aov': 35.0})
+    settings = type("obj", (object,), {"timezone": "America/New_York", "dry_run": True, "default_aov": 35.0})
+    BidCalculator = object
     BigQueryClient = object
-    AmazonAdsClient = object
+    TenantConfig = object
+    aov_fetcher = None
 
-# Setup Logger
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# --- BID CALCULATOR LOGIC (Moved from bottom of file) ---
-class BidCalculator:
-    """Core logic for determining bid prices"""
-    
-    def __init__(self):
-        # AOV-based bid ceiling definitions
-        self.AOV_CEILINGS = {
-            "L": {"base": 1.05, "max": 1.15}, # Low Ticket
-            "M": {"base": 1.40, "max": 1.60}, # Mid Ticket
-            "H": {"base": 1.95, "max": 2.20}, # High Ticket
-            "X": {"base": 2.50, "max": 2.75}, # Luxury / Extra High
-        }
 
-    def classify_performance_tier(self, conversions: int, clicks: int, acos: float, cvr: float) -> str:
-        """Classify keyword performance"""
-        if conversions >= 5 and acos < 0.30: return "A"
-        if conversions >= 2 and acos < 0.40: return "B"
-        if conversions >= 1: return "C"
-        if clicks > 15 and conversions == 0: return "D" # Bleeder
-        return "C" # Default
-
-    def calculate_bid_ceiling(self, asin: str, performance_tier: str, match_type: str) -> float:
-        """
-        Calculate dynamic bid ceiling based on:
-        - ASIN AOV (real-time from aov_fetcher)
-        - Keyword performance tier
-        - Match type
-        """
-        # Get AOV tier dynamically from fetcher
-        aov_tier = aov_fetcher.get_aov_tier(asin)
-        aov_data = aov_fetcher.get_aov(asin)
-        
-        # Base ceiling from AOV configuration
-        # Fallback to 'L' if tier not found
-        ceiling_config = self.AOV_CEILINGS.get(aov_tier, self.AOV_CEILINGS["L"])
-        base_ceiling = ceiling_config["base"]
-        
-        # Performance tier modifier
-        tier_modifiers = {
-            "A": 1.20, # Boost winners
-            "B": 1.00, # Base
-            "C": 0.80, # Conservative
-            "D": 0.40, # Aggressive Cut
-        }
-        
-        # Match type modifier
-        match_modifiers = {
-            "EXACT": 1.00,
-            "PHRASE": 0.75,
-            "BROAD": 0.50,
-        }
-        
-        # Normalize match type string
-        match_type_key = match_type.upper() if match_type else "BROAD"
-        
-        ceiling = (
-            base_ceiling
-            * tier_modifiers.get(performance_tier, 0.65)
-            * match_modifiers.get(match_type_key, 0.50)
-        )
-        
-        # Apply confidence penalty for default AOV
-        if aov_data.confidence == "default":
-            ceiling *= 0.85
-            
-        return round(ceiling, 2)
-
-    def calculate_optimal_bid(self, keyword_data: dict, current_hour: int) -> dict:
-        """
-        Main calculation wrapper
-        """
-        asin = keyword_data.get('advertisedAsin', '')
-        current_bid = float(keyword_data.get('current_bid', 0.50))
-        
-        perf_tier = self.classify_performance_tier(
-            keyword_data.get('conversions', 0),
-            keyword_data.get('clicks', 0),
-            keyword_data.get('acos', 0.0),
-            keyword_data.get('cvr', 0.0)
-        )
-        
-        ceiling = self.calculate_bid_ceiling(
-            asin, 
-            perf_tier, 
-            keyword_data.get('matchType', 'BROAD')
-        )
-        
-        # -- Simplified Logic for updates --
-        # (Real logic should match the detailed AOVBidOptimizer from previous file)
-        # Here we just ensure we don't exceed the calculated ceiling
-        
-        if current_bid > ceiling:
-            new_bid = ceiling
-            reason = "Bid exceeded AOV ceiling"
-        elif perf_tier == "A" and current_bid < ceiling:
-            new_bid = min(current_bid * 1.1, ceiling)
-            reason = "Scale winner"
-        elif perf_tier == "D":
-            new_bid = min(current_bid * 0.75, ceiling)
-            reason = "Cut bleeder"
-        else:
-            new_bid = current_bid
-            reason = "Hold"
-
-        # Stability check
-        should_update = abs(new_bid - current_bid) > 0.02
-
-        return {
-            "optimal_bid": round(new_bid, 2),
-            "should_update": should_update,
-            "reason": reason,
-            "components": {"ceiling": ceiling, "tier": perf_tier}
-        }
-
-# --- MAIN OPTIMIZER CLASS ---
 class BidOptimizer:
-    def __init__(self):
-        # Initialize clients
-        # Note: Using mocked objects if imports failed above
+    """Optimizes keyword bids for a single tenant."""
+
+    def __init__(self, tenant: Optional["TenantConfig"] = None):
+        # Resolve tenant (explicit arg wins; else load from environment)
+        if tenant is None:
+            try:
+                tenant = tenant_from_env()
+            except Exception as e:
+                logger.warning(f"No tenant configured from env: {e}")
+                tenant = None
+        self.tenant = tenant
+
+        # BigQuery client (per-tenant dataset when available)
         try:
-            self.bq_client = BigQueryClient()
-            self.amazon_client = AmazonAdsClient()
-        except:
-            logger.warning("Clients not initialized (Import/Config error)")
+            if tenant and tenant.bq_project and tenant.bq_dataset:
+                self.bq_client = BigQueryClient(tenant.bq_project, tenant.bq_dataset)
+            else:
+                self.bq_client = BigQueryClient()
+        except Exception as e:
+            logger.warning(f"BigQuery client not initialized: {e}")
             self.bq_client = None
+
+        # Amazon client (built from THIS tenant's credentials)
+        try:
+            self.amazon_client = build_amazon_client(tenant) if tenant else None
+        except Exception as e:
+            logger.warning(f"Amazon client not initialized: {e}")
             self.amazon_client = None
-            
-        self.bid_calculator = BidCalculator()
-        
-        # Timezone setup
-        tz_name = getattr(settings, 'timezone', 'America/Los_Angeles')
+
+        self.bid_calculator = BidCalculator(
+            target_acos=getattr(tenant, "target_acos", None) if tenant else None
+        )
+
+        tz_name = getattr(settings, "timezone", "America/New_York")
         self.tz = pytz.timezone(tz_name)
-        
+
         self.stats = {
             "keywords_evaluated": 0,
             "bids_updated": 0,
             "bids_unchanged": 0,
             "errors": 0,
             "total_bid_increase": 0.0,
-            "total_bid_decrease": 0.0
+            "total_bid_decrease": 0.0,
         }
-    
+
+    def _aov_for(self, keyword: Dict) -> Optional[float]:
+        """Best-effort AOV lookup for a keyword's ASIN."""
+        if aov_fetcher is not None:
+            try:
+                asin = keyword.get("advertisedAsin") or keyword.get("asin")
+                if asin:
+                    data = aov_fetcher.get_aov(asin)
+                    # aov_fetcher may return an object or a float
+                    return float(getattr(data, "aov", data))
+            except Exception:
+                pass
+        if keyword.get("aov") is not None:
+            return float(keyword["aov"])
+        return None
+
     def run(self):
-        """Main optimization workflow"""
         logger.info("=" * 60)
         logger.info("🚀 Starting Bid Optimization Job")
+        if self.tenant:
+            logger.info(f"Tenant: {self.tenant.masked()}")
         logger.info(f"Timestamp: {datetime.now(self.tz).isoformat()}")
         logger.info(f"Dry Run: {getattr(settings, 'dry_run', True)}")
         logger.info("=" * 60)
-        
+
         try:
-            # Step 1: Pre-load AOV data into memory
-            logger.info("\n💰 Step 1: Loading AOV Data")
-            aov_fetcher.fetch_all() # <--- CORRECTED: Using the fetcher we built
-            
-            # Step 2: Get keywords (Mocking the BQ call for structure)
-            logger.info("\n🔍 Step 2: Loading Keywords")
+            if aov_fetcher is not None:
+                logger.info("💰 Loading AOV data")
+                try:
+                    aov_fetcher.fetch_all()
+                except Exception as e:
+                    logger.warning(f"AOV preload skipped: {e}")
+
+            logger.info("🔍 Loading keywords")
             if self.bq_client:
-                keywords = self.bq_client.get_keywords_for_optimization(min_clicks=5, days_lookback=14)
+                keywords = self.bq_client.get_keywords_for_optimization(
+                    min_clicks=5, days_lookback=14
+                )
             else:
-                keywords = [] # Empty if no client
+                keywords = []
                 logger.warning("No BigQuery client available.")
 
             logger.info(f"Found {len(keywords)} keywords to evaluate")
-            
             if not keywords:
                 logger.warning("⚠️ No keywords to optimize")
                 return
-            
-            # Step 3: Calculate optimal bids
-            logger.info("\n🧮 Step 3: Calculating Optimal Bids")
+
             current_hour = datetime.now(self.tz).hour
-            
-            bid_updates = []
-            
+            bid_updates: List[Dict] = []
+
             for keyword in keywords:
                 self.stats["keywords_evaluated"] += 1
-                
-                # Logic calculation
-                result = self.bid_calculator.calculate_optimal_bid(
+
+                result = self.bid_calculator.calculate_optimal_bid_from_data(
                     keyword_data=keyword,
-                    current_hour=current_hour
+                    current_hour=current_hour,
+                    asin_aov=self._aov_for(keyword),
+                    user_override=keyword.get("user_override"),
+                    override_expires_at=keyword.get("override_expires_at"),
                 )
-                
-                if result["should_update"]:
-                    current_bid = keyword.get("current_bid", 0.0)
-                    optimal_bid = result["optimal_bid"]
-                    bid_change = optimal_bid - current_bid
-                    
-                    # CRITICAL: Convert keywordId to string (Amazon API requirement)
-                    bid_updates.append({
-                        "keywordId": str(keyword["keywordId"]),
-                        "bid": optimal_bid
-                    })
-                    
-                    # Log to BQ
-                    if self.bq_client:
+
+                if not result["should_update"]:
+                    self.stats["bids_unchanged"] += 1
+                    continue
+
+                current_bid = float(keyword.get("current_bid", 0.0))
+                optimal_bid = result["optimal_bid"]
+                bid_change = optimal_bid - current_bid
+
+                bid_updates.append(
+                    {"keywordId": str(keyword["keywordId"]), "bid": optimal_bid}
+                )
+
+                if self.bq_client:
+                    try:
                         self.bq_client.log_bid_change(
                             keyword_id=str(keyword["keywordId"]),
                             old_bid=current_bid,
                             new_bid=optimal_bid,
-                            reason=result["reason"]
+                            reason=result["reason"],
                         )
-                    
-                    self.stats["bids_updated"] += 1
-                    if bid_change > 0:
-                        self.stats["total_bid_increase"] += bid_change
-                    else:
-                        self.stats["total_bid_decrease"] += abs(bid_change)
-                    
-                    logger.info(
-                        f"📈 {keyword.get('keywordText', 'Unknown')}: "
-                        f"${current_bid:.2f} → ${optimal_bid:.2f} "
-                        f"({result['reason']})"
-                    )
+                    except Exception as e:
+                        logger.warning(f"log_bid_change failed: {e}")
+
+                self.stats["bids_updated"] += 1
+                if bid_change > 0:
+                    self.stats["total_bid_increase"] += bid_change
                 else:
-                    self.stats["bids_unchanged"] += 1
-            
-            # Step 4: Apply updates via Amazon API
-            if bid_updates and not getattr(settings, 'dry_run', True):
-                logger.info(f"\n🔄 Step 4: Applying {len(bid_updates)} Bid Updates")
-                if self.amazon_client:
-                    update_results = self.amazon_client.batch_update_keyword_bids(bid_updates)
-                    logger.info(f"✅ Successfully updated: {update_results.get('success', 0)}")
-                else:
-                    logger.error("Amazon Client missing, cannot push updates.")
-            elif getattr(settings, 'dry_run', True):
-                 logger.info(f"\n✋ DRY RUN ENABLED: Skipping Amazon API update for {len(bid_updates)} bids.")
+                    self.stats["total_bid_decrease"] += abs(bid_change)
+
+                logger.info(
+                    f"📈 {keyword.get('keywordText', 'Unknown')}: "
+                    f"${current_bid:.2f} → ${optimal_bid:.2f} ({result['reason']})"
+                )
+
+            # Apply (the client itself honors dry_run)
+            if bid_updates and self.amazon_client:
+                logger.info(f"🔄 Applying {len(bid_updates)} bid updates")
+                res = self.amazon_client.batch_update_keyword_bids(bid_updates)
+                logger.info(f"✅ Updated: {res.get('success', 0)}, failed: {res.get('failed', 0)}")
+            elif bid_updates:
+                logger.warning("Amazon client missing — computed updates not pushed.")
             else:
-                logger.info("\n✅ No bid updates needed")
-            
-            # Step 5: Summary
+                logger.info("✅ No bid updates needed")
+
             self._print_summary()
-            
+
         except Exception as e:
             logger.error(f"❌ Bid optimization job failed: {e}", exc_info=True)
             self.stats["errors"] += 1
             sys.exit(1)
-    
+
     def _print_summary(self):
-        """Print job summary statistics"""
-        logger.info("\n" + "=" * 60)
-        logger.info("📊 JOB SUMMARY")
+        s = self.stats
+        net = s["total_bid_increase"] - s["total_bid_decrease"]
         logger.info("=" * 60)
-        logger.info(f"Keywords Evaluated:   {self.stats['keywords_evaluated']}")
-        logger.info(f"Bids Updated:         {self.stats['bids_updated']}")
-        logger.info(f"Bids Unchanged:       {self.stats['bids_unchanged']}")
-        logger.info(f"Errors:               {self.stats['errors']}")
-        logger.info(f"Total Bid Increase:   ${self.stats['total_bid_increase']:.2f}")
-        logger.info(f"Total Bid Decrease:   ${self.stats['total_bid_decrease']:.2f}")
-        net = self.stats['total_bid_increase'] - self.stats['total_bid_decrease']
-        logger.info(f"Net Change:           ${net:.2f}")
+        logger.info("📊 JOB SUMMARY")
+        logger.info(f"Keywords Evaluated: {s['keywords_evaluated']}")
+        logger.info(f"Bids Updated:       {s['bids_updated']}")
+        logger.info(f"Bids Unchanged:     {s['bids_unchanged']}")
+        logger.info(f"Errors:             {s['errors']}")
+        logger.info(f"Total Increase:     ${s['total_bid_increase']:.2f}")
+        logger.info(f"Total Decrease:     ${s['total_bid_decrease']:.2f}")
+        logger.info(f"Net Change:         ${net:.2f}")
         logger.info("=" * 60)
 
 
 def main():
-    """Entry point for Cloud Run Job"""
-    optimizer = BidOptimizer()
-    optimizer.run()
+    """Entry point for the Cloud Run Job."""
+    BidOptimizer().run()
 
-# Ensure this block is AT THE END
+
 if __name__ == "__main__":
     main()
